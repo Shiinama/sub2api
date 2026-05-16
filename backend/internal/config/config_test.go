@@ -804,6 +804,41 @@ func TestGetServerAddressFromEnv(t *testing.T) {
 	}
 }
 
+func TestGetServerAddressUsesPlatformPort(t *testing.T) {
+	t.Setenv("SERVER_HOST", "0.0.0.0")
+	t.Setenv("PORT", "4567")
+
+	address := GetServerAddress()
+	if address != "0.0.0.0:4567" {
+		t.Fatalf("GetServerAddress() = %q", address)
+	}
+}
+
+func TestLoadAppliesRailwayStyleURLs(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("PORT", "4567")
+	t.Setenv("DATABASE_URL", "postgresql://db_user:db_pass@postgres.railway.internal:6543/railway?sslmode=require")
+	t.Setenv("REDIS_URL", "rediss://default:redis_pass@redis.railway.internal:6380/2")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	require.Equal(t, 4567, cfg.Server.Port)
+	require.Equal(t, "postgres.railway.internal", cfg.Database.Host)
+	require.Equal(t, 6543, cfg.Database.Port)
+	require.Equal(t, "db_user", cfg.Database.User)
+	require.Equal(t, "db_pass", cfg.Database.Password)
+	require.Equal(t, "railway", cfg.Database.DBName)
+	require.Equal(t, "require", cfg.Database.SSLMode)
+	require.Equal(t, "redis.railway.internal", cfg.Redis.Host)
+	require.Equal(t, 6380, cfg.Redis.Port)
+	require.Equal(t, "redis_pass", cfg.Redis.Password)
+	require.Equal(t, 2, cfg.Redis.DB)
+	require.True(t, cfg.Redis.EnableTLS)
+}
+
 func TestValidateAbsoluteHTTPURL(t *testing.T) {
 	if err := ValidateAbsoluteHTTPURL("https://example.com/path"); err != nil {
 		t.Fatalf("ValidateAbsoluteHTTPURL valid url error: %v", err)

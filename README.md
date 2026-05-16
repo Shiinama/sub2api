@@ -303,7 +303,14 @@ ADMIN_PASSWORD=your_admin_password
 
 # Optional: Custom port
 SERVER_PORT=8080
+
+# Platform-friendly overrides (used automatically when present)
+PORT=8080
+DATABASE_URL=postgresql://user:pass@host:5432/dbname?sslmode=require
+REDIS_URL=rediss://:pass@host:6380/0
 ```
+
+When deploying on platforms such as Railway, `PORT`, `DATABASE_URL`, and `REDIS_URL` are read automatically. `SERVER_PORT` still works if you prefer explicit app settings.
 
 **Generate secure secrets:**
 ```bash

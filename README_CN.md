@@ -304,7 +304,14 @@ ADMIN_PASSWORD=your_admin_password
 
 # 可选：自定义端口
 SERVER_PORT=8080
+
+# 平台变量自动兼容
+PORT=8080
+DATABASE_URL=postgresql://user:pass@host:5432/dbname?sslmode=require
+REDIS_URL=rediss://:pass@host:6380/0
 ```
+
+如果部署在 Railway 等平台上，`PORT`、`DATABASE_URL` 和 `REDIS_URL` 会被自动读取；如果你更喜欢显式配置，`SERVER_PORT` 仍然可用。
 
 **生成安全密钥：**
 ```bash

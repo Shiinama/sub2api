@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -531,6 +532,79 @@ func getEnvIntOrDefault(key string, defaultValue int) int {
 	return defaultValue
 }
 
+func getEnvIntOrFallback(primaryKey, fallbackKey string, defaultValue int) int {
+	if val := os.Getenv(primaryKey); val != "" {
+		if i, err := strconv.Atoi(val); err == nil {
+			return i
+		}
+	}
+	return getEnvIntOrDefault(fallbackKey, defaultValue)
+}
+
+func applyDatabaseURL(cfg *DatabaseConfig, raw string) {
+	if cfg == nil {
+		return
+	}
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return
+	}
+	if scheme := strings.ToLower(u.Scheme); scheme != "postgres" && scheme != "postgresql" {
+		return
+	}
+	if host := strings.TrimSpace(u.Hostname()); host != "" {
+		cfg.Host = host
+	}
+	if port := strings.TrimSpace(u.Port()); port != "" {
+		if parsed, err := strconv.Atoi(port); err == nil {
+			cfg.Port = parsed
+		}
+	}
+	if user := u.User.Username(); user != "" {
+		cfg.User = user
+	}
+	if password, ok := u.User.Password(); ok {
+		cfg.Password = password
+	}
+	if dbName := strings.Trim(strings.TrimSpace(u.Path), "/"); dbName != "" {
+		cfg.DBName = dbName
+	}
+	if sslMode := strings.TrimSpace(u.Query().Get("sslmode")); sslMode != "" {
+		cfg.SSLMode = sslMode
+	}
+}
+
+func applyRedisURL(cfg *RedisConfig, raw string) {
+	if cfg == nil {
+		return
+	}
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "redis" && scheme != "rediss" {
+		return
+	}
+	if host := strings.TrimSpace(u.Hostname()); host != "" {
+		cfg.Host = host
+	}
+	if port := strings.TrimSpace(u.Port()); port != "" {
+		if parsed, err := strconv.Atoi(port); err == nil {
+			cfg.Port = parsed
+		}
+	}
+	if password, ok := u.User.Password(); ok {
+		cfg.Password = password
+	}
+	if dbPath := strings.Trim(strings.TrimSpace(u.Path), "/"); dbPath != "" {
+		if parsed, err := strconv.Atoi(dbPath); err == nil {
+			cfg.DB = parsed
+		}
+	}
+	cfg.EnableTLS = scheme == "rediss"
+}
+
 // AutoSetupFromEnv performs automatic setup using environment variables
 // This is designed for Docker deployment where all config is passed via env vars
 func AutoSetupFromEnv() error {
@@ -566,7 +640,7 @@ func AutoSetupFromEnv() error {
 		},
 		Server: ServerConfig{
 			Host: getEnvOrDefault("SERVER_HOST", "0.0.0.0"),
-			Port: getEnvIntOrDefault("SERVER_PORT", 8080),
+			Port: getEnvIntOrFallback("SERVER_PORT", "PORT", 8080),
 			Mode: getEnvOrDefault("SERVER_MODE", "release"),
 		},
 		JWT: JWTConfig{
@@ -575,6 +649,8 @@ func AutoSetupFromEnv() error {
 		},
 		Timezone: tz,
 	}
+	applyDatabaseURL(&cfg.Database, os.Getenv("DATABASE_URL"))
+	applyRedisURL(&cfg.Redis, os.Getenv("REDIS_URL"))
 
 	// Generate JWT secret if not provided
 	if cfg.JWT.Secret == "" {

@@ -304,7 +304,14 @@ ADMIN_PASSWORD=your_admin_password
 
 # オプション: カスタムポート
 SERVER_PORT=8080
+
+# プラットフォーム向けの自動対応
+PORT=8080
+DATABASE_URL=postgresql://user:pass@host:5432/dbname?sslmode=require
+REDIS_URL=rediss://:pass@host:6380/0
 ```
+
+Railway などのプラットフォームでは、`PORT`、`DATABASE_URL`、`REDIS_URL` が自動的に読み込まれます。必要なら `SERVER_PORT` で明示的に上書きできます。
 
 **セキュアなシークレットの生成方法:**
 ```bash

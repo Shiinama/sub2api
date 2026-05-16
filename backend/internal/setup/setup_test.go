@@ -70,6 +70,49 @@ func TestSetupDefaultAdminConcurrency(t *testing.T) {
 	})
 }
 
+func TestGetEnvIntOrFallbackUsesPlatformPort(t *testing.T) {
+	t.Setenv("PORT", "4567")
+
+	if got := getEnvIntOrFallback("SERVER_PORT", "PORT", 8080); got != 4567 {
+		t.Fatalf("getEnvIntOrFallback()=%d, want 4567", got)
+	}
+}
+
+func TestApplyDatabaseURL(t *testing.T) {
+	cfg := DatabaseConfig{
+		Host:    "localhost",
+		Port:    5432,
+		User:    "postgres",
+		DBName:  "sub2api",
+		SSLMode: "disable",
+	}
+
+	applyDatabaseURL(&cfg, "postgresql://db_user:db_pass@postgres.railway.internal:6543/railway?sslmode=require")
+
+	if cfg.Host != "postgres.railway.internal" ||
+		cfg.Port != 6543 ||
+		cfg.User != "db_user" ||
+		cfg.Password != "db_pass" ||
+		cfg.DBName != "railway" ||
+		cfg.SSLMode != "require" {
+		t.Fatalf("applyDatabaseURL() unexpected config: %#v", cfg)
+	}
+}
+
+func TestApplyRedisURL(t *testing.T) {
+	cfg := RedisConfig{Host: "localhost", Port: 6379}
+
+	applyRedisURL(&cfg, "rediss://default:redis_pass@redis.railway.internal:6380/2")
+
+	if cfg.Host != "redis.railway.internal" ||
+		cfg.Port != 6380 ||
+		cfg.Password != "redis_pass" ||
+		cfg.DB != 2 ||
+		!cfg.EnableTLS {
+		t.Fatalf("applyRedisURL() unexpected config: %#v", cfg)
+	}
+}
+
 func TestWriteConfigFileKeepsDefaultUserConcurrency(t *testing.T) {
 	t.Setenv("RUN_MODE", "simple")
 	t.Setenv("DATA_DIR", t.TempDir())

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -1379,6 +1380,8 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	if err := viper.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config error: %w", err)
 	}
+
+	applyPlatformEnvOverrides(&cfg)
 
 	cfg.RunMode = NormalizeRunMode(cfg.RunMode)
 	cfg.Server.Mode = strings.ToLower(strings.TrimSpace(cfg.Server.Mode))
@@ -2832,7 +2835,97 @@ func GetServerAddress() string {
 
 	host := v.GetString("server.host")
 	port := v.GetInt("server.port")
+	if _, ok := os.LookupEnv("SERVER_PORT"); !ok {
+		if platformPort := strings.TrimSpace(os.Getenv("PORT")); platformPort != "" {
+			if parsed, err := strconv.Atoi(platformPort); err == nil {
+				port = parsed
+			}
+		}
+	}
 	return fmt.Sprintf("%s:%d", host, port)
+}
+
+func applyPlatformEnvOverrides(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if _, ok := os.LookupEnv("SERVER_PORT"); !ok {
+		if platformPort := strings.TrimSpace(os.Getenv("PORT")); platformPort != "" {
+			if parsed, err := strconv.Atoi(platformPort); err == nil {
+				cfg.Server.Port = parsed
+			}
+		}
+	}
+	if databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL")); databaseURL != "" {
+		applyDatabaseURL(&cfg.Database, databaseURL)
+	}
+	if redisURL := strings.TrimSpace(os.Getenv("REDIS_URL")); redisURL != "" {
+		applyRedisURL(&cfg.Redis, redisURL)
+	}
+}
+
+func applyDatabaseURL(cfg *DatabaseConfig, raw string) {
+	if cfg == nil {
+		return
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return
+	}
+	if scheme := strings.ToLower(u.Scheme); scheme != "postgres" && scheme != "postgresql" {
+		return
+	}
+	if host := strings.TrimSpace(u.Hostname()); host != "" {
+		cfg.Host = host
+	}
+	if port := strings.TrimSpace(u.Port()); port != "" {
+		if parsed, err := strconv.Atoi(port); err == nil {
+			cfg.Port = parsed
+		}
+	}
+	if user := u.User.Username(); user != "" {
+		cfg.User = user
+	}
+	if password, ok := u.User.Password(); ok {
+		cfg.Password = password
+	}
+	if dbName := strings.Trim(strings.TrimSpace(u.Path), "/"); dbName != "" {
+		cfg.DBName = dbName
+	}
+	if sslMode := strings.TrimSpace(u.Query().Get("sslmode")); sslMode != "" {
+		cfg.SSLMode = sslMode
+	}
+}
+
+func applyRedisURL(cfg *RedisConfig, raw string) {
+	if cfg == nil {
+		return
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "redis" && scheme != "rediss" {
+		return
+	}
+	if host := strings.TrimSpace(u.Hostname()); host != "" {
+		cfg.Host = host
+	}
+	if port := strings.TrimSpace(u.Port()); port != "" {
+		if parsed, err := strconv.Atoi(port); err == nil {
+			cfg.Port = parsed
+		}
+	}
+	if password, ok := u.User.Password(); ok {
+		cfg.Password = password
+	}
+	if dbPath := strings.Trim(strings.TrimSpace(u.Path), "/"); dbPath != "" {
+		if parsed, err := strconv.Atoi(dbPath); err == nil {
+			cfg.DB = parsed
+		}
+	}
+	cfg.EnableTLS = scheme == "rediss"
 }
 
 // ValidateAbsoluteHTTPURL 验证是否为有效的绝对 HTTP(S) URL

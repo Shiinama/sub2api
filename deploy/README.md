@@ -213,6 +213,9 @@ docker compose down -v
 | `JWT_SECRET` | **Recommended** | *(auto-generated)* | JWT secret (fixed for persistent sessions) |
 | `TOTP_ENCRYPTION_KEY` | **Recommended** | *(auto-generated)* | TOTP encryption key (fixed for persistent 2FA) |
 | `SERVER_PORT` | No | `8080` | Server port |
+| `PORT` | No | - | Platform-assigned port, used automatically when `SERVER_PORT` is not set |
+| `DATABASE_URL` | No | - | Full PostgreSQL connection string, used automatically when present |
+| `REDIS_URL` | No | - | Full Redis connection string, used automatically when present |
 | `ADMIN_EMAIL` | No | `admin@sub2api.local` | Admin email |
 | `ADMIN_PASSWORD` | No | *(auto-generated)* | Admin password |
 | `TZ` | No | `Asia/Shanghai` | Timezone |
@@ -224,6 +227,8 @@ docker compose down -v
 See `.env.example` for all available options.
 
 > **Note:** The `docker-deploy.sh` script automatically generates `JWT_SECRET`, `TOTP_ENCRYPTION_KEY`, and `POSTGRES_PASSWORD` for you.
+
+> **Platform note:** When deploying on Railway or similar platforms, `PORT`, `DATABASE_URL`, and `REDIS_URL` are accepted automatically. You can keep `SERVER_PORT` unset there unless you want to override the platform port manually.
 
 ### Easy Migration (Local Directory Version)
 
