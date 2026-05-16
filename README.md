@@ -23,4 +23,3 @@ After deploy, open `/health` to verify the service is up.
 
 - The main Docker entrypoint and Railway settings already live in this repo.
 - More deployment details are in [deploy/README.md](deploy/README.md).
-- Demo and product docs were removed from this top-level file to keep Railway setup short.

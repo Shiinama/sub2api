@@ -6,8 +6,31 @@ This directory contains files for deploying Sub2API on Linux servers.
 
 | Method | Best For | Setup Wizard |
 |--------|----------|--------------|
+| **Railway** | Fast cloud deploy, managed env vars | Not needed |
 | **Docker Compose** | Quick setup, all-in-one | Not needed (auto-setup) |
 | **Binary Install** | Production servers, systemd | Web-based wizard |
+
+## Railway Deployment
+
+This repo includes `Dockerfile` and `railway.toml`, so Railway can deploy it directly.
+
+### Quick Start
+
+1. Create a new Railway project from this GitHub repo.
+2. Add PostgreSQL and Redis services, or connect existing ones.
+3. Set `DATABASE_URL` and `REDIS_URL`.
+4. Deploy.
+
+Railway will provide `PORT` automatically. You can also set `SERVER_PORT` if you want to override it manually.
+
+### Verify
+
+After deploy, open `/health` to confirm the service is running.
+
+### Notes
+
+- More detailed Docker and binary deployment steps are below.
+- Railway-specific environment variables are listed in the table later in this file.
 
 ## Files
 
