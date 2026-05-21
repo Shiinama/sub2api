@@ -558,6 +558,7 @@ export interface SystemSettings {
   enable_cch_signing: boolean;
   enable_anthropic_cache_ttl_1h_injection: boolean;
   rewrite_message_cache_control: boolean;
+  enable_claude_code_oauth_mimicry: boolean;
   antigravity_user_agent_version: string;
   openai_codex_user_agent: string;
   openai_allow_claude_code_codex_plugin: boolean;
@@ -791,6 +792,7 @@ export interface UpdateSettingsRequest {
   enable_cch_signing?: boolean;
   enable_anthropic_cache_ttl_1h_injection?: boolean;
   rewrite_message_cache_control?: boolean;
+  enable_claude_code_oauth_mimicry?: boolean;
   antigravity_user_agent_version?: string;
   openai_codex_user_agent?: string;
   openai_allow_claude_code_codex_plugin?: boolean;

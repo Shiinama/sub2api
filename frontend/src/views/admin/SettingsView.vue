@@ -3889,6 +3889,29 @@
                 <Toggle v-model="form.rewrite_message_cache_control" />
               </div>
 
+              <!-- Claude Code OAuth 伪装 -->
+              <div class="flex items-center justify-between">
+                <div>
+                  <label
+                    class="text-sm font-medium text-gray-700 dark:text-gray-300"
+                  >
+                    {{
+                      t(
+                        "admin.settings.gatewayForwarding.claudeCodeOAuthMimicry",
+                      )
+                    }}
+                  </label>
+                  <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                    {{
+                      t(
+                        "admin.settings.gatewayForwarding.claudeCodeOAuthMimicryHint",
+                      )
+                    }}
+                  </p>
+                </div>
+                <Toggle v-model="form.enable_claude_code_oauth_mimicry" />
+              </div>
+
               <!-- Antigravity UA 版本 -->
               <div>
                 <label
@@ -7173,6 +7196,7 @@ const form = reactive<SettingsForm>({
   enable_cch_signing: false,
   enable_anthropic_cache_ttl_1h_injection: false,
   rewrite_message_cache_control: false,
+  enable_claude_code_oauth_mimicry: true,
   antigravity_user_agent_version: "",
   openai_codex_user_agent: "",
   openai_allow_claude_code_codex_plugin: false,
@@ -8277,6 +8301,8 @@ async function saveSettings() {
       enable_anthropic_cache_ttl_1h_injection:
         form.enable_anthropic_cache_ttl_1h_injection,
       rewrite_message_cache_control: form.rewrite_message_cache_control,
+      enable_claude_code_oauth_mimicry:
+        form.enable_claude_code_oauth_mimicry,
       antigravity_user_agent_version:
         form.antigravity_user_agent_version?.trim() || "",
       openai_codex_user_agent:

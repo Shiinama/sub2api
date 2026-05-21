@@ -193,6 +193,7 @@ type SystemSettings struct {
 	EnableCCHSigning                   bool   // 是否对 billing header cch 进行签名（默认 false）
 	EnableAnthropicCacheTTL1hInjection bool   // 是否对 Anthropic OAuth/SetupToken 请求体注入 1h cache_control ttl（默认 false）
 	RewriteMessageCacheControl         bool   // 是否改写 messages[*].content[*].cache_control（默认 false）
+	EnableClaudeCodeOAuthMimicry       bool   // 是否对非 Claude Code 客户端的 OAuth 请求启用 Claude Code 伪装（默认 true）
 	AntigravityUserAgentVersion        string // Antigravity 上游 User-Agent 版本号；空值使用配置/默认值
 	OpenAICodexUserAgent               string // OpenAI Codex 上游完整 User-Agent；空值使用内置默认
 	OpenAIAllowClaudeCodeCodexPlugin   bool   // 全局开关：是否额外放行 Claude Code 的 Codex 插件（默认 false）

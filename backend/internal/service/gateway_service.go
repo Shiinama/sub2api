@@ -294,7 +294,7 @@ func extractSystemPreviewFromBody(body []byte) string {
 	}
 }
 
-func buildClaudeMimicDebugLine(req *http.Request, body []byte, account *Account, tokenType string, mimicClaudeCode bool) string {
+func buildClaudeMimicDebugLine(req *http.Request, body []byte, account *Account, tokenType string, mode claudeUpstreamForwardingMode) string {
 	if req == nil {
 		return ""
 	}
@@ -346,20 +346,21 @@ func buildClaudeMimicDebugLine(req *http.Request, body []byte, account *Account,
 	}
 
 	return fmt.Sprintf(
-		"url=%s account=%d(%s) tokenType=%s mimic=%t meta.user_id=%q system.preview=%q headers={%s}",
+		"url=%s account=%d(%s) tokenType=%s mimic=%t transparent_oauth=%t meta.user_id=%q system.preview=%q headers={%s}",
 		req.URL.String(),
 		aid,
 		aname,
 		tokenType,
-		mimicClaudeCode,
+		mode.mimicClaudeCode,
+		mode.transparentOAuth,
 		metaUserID,
 		sysPreview,
 		strings.Join(h, " "),
 	)
 }
 
-func logClaudeMimicDebug(req *http.Request, body []byte, account *Account, tokenType string, mimicClaudeCode bool) {
-	line := buildClaudeMimicDebugLine(req, body, account, tokenType, mimicClaudeCode)
+func logClaudeMimicDebug(req *http.Request, body []byte, account *Account, tokenType string, mode claudeUpstreamForwardingMode) {
+	line := buildClaudeMimicDebugLine(req, body, account, tokenType, mode)
 	if line == "" {
 		return
 	}
@@ -955,6 +956,11 @@ type claudeOAuthNormalizeOptions struct {
 	stripSystemCacheControl bool
 }
 
+type claudeUpstreamForwardingMode struct {
+	mimicClaudeCode  bool
+	transparentOAuth bool
+}
+
 // sanitizeSystemText rewrites only the fixed OpenCode identity sentence (if present).
 // We intentionally avoid broad keyword replacement in system prompts to prevent
 // accidentally changing user-provided instructions.
@@ -1324,6 +1330,23 @@ func (s *GatewayService) applyClaudeCodeOAuthMimicryToBody(
 	}
 
 	return body
+}
+
+func (s *GatewayService) isClaudeCodeOAuthMimicryEnabled(ctx context.Context) bool {
+	if s == nil || s.settingService == nil {
+		return true
+	}
+	return s.settingService.IsClaudeCodeOAuthMimicryEnabled(ctx)
+}
+
+func (s *GatewayService) claudeOAuthForwardingMode(ctx context.Context, account *Account, isClaudeCode bool) claudeUpstreamForwardingMode {
+	if account == nil || !account.IsOAuth() || isClaudeCode {
+		return claudeUpstreamForwardingMode{}
+	}
+	if s.isClaudeCodeOAuthMimicryEnabled(ctx) {
+		return claudeUpstreamForwardingMode{mimicClaudeCode: true}
+	}
+	return claudeUpstreamForwardingMode{transparentOAuth: true}
 }
 
 // buildOAuthMetadataUserIDFromBody 是 buildOAuthMetadataUserID 的变体，
@@ -4462,11 +4485,12 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	// （长 system prompt 被替换为 ~45 tokens 的短 prompt，低于 Anthropic 1024 token
 	// 最低缓存门槛，导致系统级缓存失效）。
 	//
-	// 对于非 Claude Code 的第三方客户端（opencode 等），仍然走完整 mimicry。
+	// 对于非 Claude Code 的第三方客户端（opencode 等），默认走完整 mimicry；
+	// 管理员关闭 Claude Code OAuth mimicry 时改为最大化透传。
 	isClaudeCode := IsClaudeCodeClient(ctx) || isClaudeCodeClient(c.GetHeader("User-Agent"), parsed.MetadataUserID)
-	shouldMimicClaudeCode := account.IsOAuth() && !isClaudeCode
+	forwardingMode := s.claudeOAuthForwardingMode(ctx, account, isClaudeCode)
 
-	if shouldMimicClaudeCode {
+	if forwardingMode.mimicClaudeCode {
 		// 与 Parrot 对齐：OAuth 账号无条件重写 system（即使客户端已发了 Claude Code
 		// 风格的 system prompt）。原因：第三方工具（opencode 等）会发 "You are Claude
 		// Code..." system prompt 但缺少 billing attribution block，导致 Anthropic
@@ -4583,7 +4607,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
 		// 构建上游请求（每次重试需要重新构建，因为请求体需要重新读取）
 		upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, reqStream)
-		upstreamReq, err := s.buildUpstreamRequest(upstreamCtx, c, account, body, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode)
+		upstreamReq, err := s.buildUpstreamRequest(upstreamCtx, c, account, body, token, tokenType, reqModel, reqStream, forwardingMode)
 		releaseUpstreamCtx()
 		if err != nil {
 			return nil, err
@@ -4665,7 +4689,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 					filteredBody := FilterThinkingBlocksForRetry(body)
 					retryCtx, releaseRetryCtx := detachStreamUpstreamContext(ctx, reqStream)
-					retryReq, buildErr := s.buildUpstreamRequest(retryCtx, c, account, filteredBody, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode)
+					retryReq, buildErr := s.buildUpstreamRequest(retryCtx, c, account, filteredBody, token, tokenType, reqModel, reqStream, forwardingMode)
 					releaseRetryCtx()
 					if buildErr == nil {
 						retryResp, retryErr := s.httpUpstream.DoWithTLS(retryReq, proxyURL, account.ID, account.Concurrency, tlsProfile)
@@ -4700,7 +4724,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 									logger.LegacyPrintf("service.gateway", "Account %d: signature retry still failing and looks tool-related, retrying with tool blocks downgraded", account.ID)
 									filteredBody2 := FilterSignatureSensitiveBlocksForRetry(body)
 									retryCtx2, releaseRetryCtx2 := detachStreamUpstreamContext(ctx, reqStream)
-									retryReq2, buildErr2 := s.buildUpstreamRequest(retryCtx2, c, account, filteredBody2, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode)
+									retryReq2, buildErr2 := s.buildUpstreamRequest(retryCtx2, c, account, filteredBody2, token, tokenType, reqModel, reqStream, forwardingMode)
 									releaseRetryCtx2()
 									if buildErr2 == nil {
 										retryResp2, retryErr2 := s.httpUpstream.DoWithTLS(retryReq2, proxyURL, account.ID, account.Concurrency, tlsProfile)
@@ -4771,7 +4795,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 					if applied && time.Since(retryStart) < maxRetryElapsed {
 						logger.LegacyPrintf("service.gateway", "Account %d: detected budget_tokens constraint error, retrying with rectified budget (budget_tokens=%d, max_tokens=%d)", account.ID, BudgetRectifyBudgetTokens, BudgetRectifyMaxTokens)
 						budgetRetryCtx, releaseBudgetRetryCtx := detachStreamUpstreamContext(ctx, reqStream)
-						budgetRetryReq, buildErr := s.buildUpstreamRequest(budgetRetryCtx, c, account, rectifiedBody, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode)
+						budgetRetryReq, buildErr := s.buildUpstreamRequest(budgetRetryCtx, c, account, rectifiedBody, token, tokenType, reqModel, reqStream, forwardingMode)
 						releaseBudgetRetryCtx()
 						if buildErr == nil {
 							budgetRetryResp, retryErr := s.httpUpstream.DoWithTLS(budgetRetryReq, proxyURL, account.ID, account.Concurrency, tlsProfile)
@@ -4981,7 +5005,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	var firstTokenMs *int
 	var clientDisconnect bool
 	if reqStream {
-		streamResult, err := s.handleStreamingResponse(ctx, resp, c, account, startTime, originalModel, reqModel, shouldMimicClaudeCode)
+		streamResult, err := s.handleStreamingResponse(ctx, resp, c, account, startTime, originalModel, reqModel, forwardingMode.mimicClaudeCode)
 		if err != nil {
 			if err.Error() == "have error in stream" {
 				return nil, &UpstreamFailoverError{
@@ -6079,7 +6103,7 @@ func (s *GatewayService) handleBedrockNonStreamingResponse(
 	return usage, nil
 }
 
-func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token, tokenType, modelID string, reqStream bool, mimicClaudeCode bool) (*http.Request, error) {
+func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token, tokenType, modelID string, reqStream bool, mode claudeUpstreamForwardingMode) (*http.Request, error) {
 	if account.Platform == PlatformAnthropic && account.Type == AccountTypeServiceAccount {
 		return s.buildUpstreamRequestAnthropicVertex(ctx, c, account, body, token, modelID, reqStream)
 	}
@@ -6118,7 +6142,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	if s.settingService != nil {
 		enableFP, enableMPT, enableCCH = s.settingService.GetGatewayForwardingSettings(ctx)
 	}
-	if account.IsOAuth() && s.identityService != nil {
+	if account.IsOAuth() && !mode.transparentOAuth && s.identityService != nil {
 		// 1. 获取或创建指纹（包含随机生成的ClientID）
 		fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, clientHeaders)
 		if err != nil {
@@ -6161,17 +6185,21 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	//   5) 透传白名单 / fingerprint / mimic header / 写入 finalBeta
 	policyFilterSet := s.getBetaPolicyFilterSet(ctx, c, account, modelID)
 	effectiveDropSet := mergeDropSets(policyFilterSet)
-	finalBetaHeader, finalBetaShouldSet := s.computeFinalAnthropicBeta(
-		tokenType, mimicClaudeCode, modelID, clientHeaders, body, effectiveDropSet,
-	)
+	finalBetaHeader := ""
+	finalBetaShouldSet := false
+	if !mode.transparentOAuth {
+		finalBetaHeader, finalBetaShouldSet = s.computeFinalAnthropicBeta(
+			tokenType, mode.mimicClaudeCode, modelID, clientHeaders, body, effectiveDropSet,
+		)
 
-	// 能力维度 body sanitize：与最终 anthropic-beta header 对称
-	if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, finalBetaHeader); changed {
-		body = sanitized
+		// 能力维度 body sanitize：与最终 anthropic-beta header 对称
+		if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, finalBetaHeader); changed {
+			body = sanitized
+		}
 	}
 
 	// CCH 签名：将 cch=00000 占位符替换为 xxHash64 签名（需在所有 body 修改之后）
-	if enableCCH {
+	if enableCCH && !mode.transparentOAuth {
 		body = signBillingHeaderCCH(body)
 	}
 
@@ -6192,7 +6220,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	// Parrot 的 build_upstream_headers 只发 9 个精确 header，不透传任何客户端 header。
 	// 透传客户端 header 会引入不一致的 x-stainless-* / anthropic-beta / user-agent /
 	// x-claude-code-session-id 等值，和我们注入的伪装 header 冲突，被 Anthropic 判 third-party。
-	if tokenType != "oauth" || !mimicClaudeCode {
+	if tokenType != "oauth" || !mode.mimicClaudeCode {
 		for key, values := range clientHeaders {
 			lowerKey := strings.ToLower(key)
 			if allowedHeaders[lowerKey] {
@@ -6205,7 +6233,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	}
 
 	// OAuth账号：应用缓存的指纹到请求头（覆盖白名单透传的头）
-	if fingerprint != nil {
+	if fingerprint != nil && !mode.transparentOAuth {
 		s.identityService.ApplyFingerprint(req, fingerprint)
 	}
 
@@ -6216,22 +6244,24 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	if getHeaderRaw(req.Header, "anthropic-version") == "" {
 		setHeaderRaw(req.Header, "anthropic-version", "2023-06-01")
 	}
-	if tokenType == "oauth" {
+	if tokenType == "oauth" && !mode.transparentOAuth {
 		applyClaudeOAuthHeaderDefaults(req)
 	}
 
 	// OAuth + mimic Claude Code：强制注入 CLI 指纹相关 header
 	// （user-agent/x-stainless-*/x-app/Accept/x-stainless-helper-method/x-client-request-id）
-	if tokenType == "oauth" && mimicClaudeCode {
+	if tokenType == "oauth" && mode.mimicClaudeCode {
 		applyClaudeCodeMimicHeaders(req, reqStream)
 	}
 
-	// 写入最终 anthropic-beta header
-	// 注：透传分支白名单可能写入了客户端 anthropic-beta，无条件 Del 一次再按 finalBeta
-	// 决定是否 set，确保 dropSet 过滤后的结果一定覆盖客户端原始值。
-	deleteHeaderAllForms(req.Header, "anthropic-beta")
-	if finalBetaShouldSet {
-		setHeaderRaw(req.Header, "anthropic-beta", finalBetaHeader)
+	if !mode.transparentOAuth {
+		// 写入最终 anthropic-beta header
+		// 注：透传分支白名单可能写入了客户端 anthropic-beta，无条件 Del 一次再按 finalBeta
+		// 决定是否 set，确保 dropSet 过滤后的结果一定覆盖客户端原始值。
+		deleteHeaderAllForms(req.Header, "anthropic-beta")
+		if finalBetaShouldSet {
+			setHeaderRaw(req.Header, "anthropic-beta", finalBetaHeader)
+		}
 	}
 
 	// 同步 X-Claude-Code-Session-Id 头：取 body 中已处理的 metadata.user_id 的 session_id 覆盖
@@ -6247,7 +6277,8 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	s.debugLogGatewaySnapshot("UPSTREAM_FORWARD", req.Header, body, map[string]string{
 		"url":                 req.URL.String(),
 		"token_type":          tokenType,
-		"mimic_claude_code":   strconv.FormatBool(mimicClaudeCode),
+		"mimic_claude_code":   strconv.FormatBool(mode.mimicClaudeCode),
+		"transparent_oauth":   strconv.FormatBool(mode.transparentOAuth),
 		"fingerprint_applied": strconv.FormatBool(fingerprint != nil),
 		"enable_fp":           strconv.FormatBool(enableFP),
 		"enable_mpt":          strconv.FormatBool(enableMPT),
@@ -6256,10 +6287,10 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	// Always capture a compact fingerprint line for later error diagnostics.
 	// We only print it when needed (or when the explicit debug flag is enabled).
 	if c != nil && tokenType == "oauth" {
-		c.Set(claudeMimicDebugInfoKey, buildClaudeMimicDebugLine(req, body, account, tokenType, mimicClaudeCode))
+		c.Set(claudeMimicDebugInfoKey, buildClaudeMimicDebugLine(req, body, account, tokenType, mode))
 	}
 	if s.debugClaudeMimicEnabled() {
-		logClaudeMimicDebug(req, body, account, tokenType, mimicClaudeCode)
+		logClaudeMimicDebug(req, body, account, tokenType, mode)
 	}
 
 	return req, nil
@@ -9195,9 +9226,9 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 	body = StripEmptyTextBlocks(body)
 
 	isClaudeCodeCT := IsClaudeCodeClient(ctx) || isClaudeCodeClient(c.GetHeader("User-Agent"), parsed.MetadataUserID)
-	shouldMimicClaudeCode := account.IsOAuth() && !isClaudeCodeCT
+	forwardingMode := s.claudeOAuthForwardingMode(ctx, account, isClaudeCodeCT)
 
-	if shouldMimicClaudeCode {
+	if forwardingMode.mimicClaudeCode {
 		normalizeOpts := claudeOAuthNormalizeOptions{stripSystemCacheControl: true}
 		body, reqModel = normalizeClaudeOAuthRequestBody(body, reqModel, normalizeOpts)
 
@@ -9250,7 +9281,7 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 	}
 
 	// 构建上游请求
-	upstreamReq, err := s.buildCountTokensRequest(ctx, c, account, body, token, tokenType, reqModel, shouldMimicClaudeCode)
+	upstreamReq, err := s.buildCountTokensRequest(ctx, c, account, body, token, tokenType, reqModel, forwardingMode)
 	if err != nil {
 		s.countTokensError(c, http.StatusInternalServerError, "api_error", "Failed to build request")
 		return err
@@ -9290,7 +9321,7 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 		logger.LegacyPrintf("service.gateway", "Account %d: detected thinking block signature error on count_tokens, retrying with filtered thinking blocks", account.ID)
 
 		filteredBody := FilterThinkingBlocksForRetry(body)
-		retryReq, buildErr := s.buildCountTokensRequest(ctx, c, account, filteredBody, token, tokenType, reqModel, shouldMimicClaudeCode)
+		retryReq, buildErr := s.buildCountTokensRequest(ctx, c, account, filteredBody, token, tokenType, reqModel, forwardingMode)
 		if buildErr == nil {
 			retryResp, retryErr := s.httpUpstream.DoWithTLS(retryReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
 			if retryErr == nil {
@@ -9533,7 +9564,7 @@ func (s *GatewayService) buildCountTokensRequestAnthropicAPIKeyPassthrough(
 }
 
 // buildCountTokensRequest 构建 count_tokens 上游请求
-func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token, tokenType, modelID string, mimicClaudeCode bool) (*http.Request, error) {
+func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token, tokenType, modelID string, mode claudeUpstreamForwardingMode) (*http.Request, error) {
 	// 确定目标 URL
 	targetURL := claudeAPICountTokensURL
 	if account.Type == AccountTypeAPIKey {
@@ -9569,7 +9600,7 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		ctEnableFP, ctEnableMPT, ctEnableCCH = s.settingService.GetGatewayForwardingSettings(ctx)
 	}
 	var ctFingerprint *Fingerprint
-	if account.IsOAuth() && s.identityService != nil {
+	if account.IsOAuth() && !mode.transparentOAuth && s.identityService != nil {
 		fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, clientHeaders)
 		if err == nil {
 			ctFingerprint = fp
@@ -9585,23 +9616,27 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	}
 
 	// 同步 billing header cc_version 与实际发送的 User-Agent 版本
-	if ctFingerprint != nil && ctEnableFP {
+	if ctFingerprint != nil && ctEnableFP && !mode.transparentOAuth {
 		body = syncBillingHeaderVersion(body, ctFingerprint.UserAgent)
 	}
 
 	// === 计算最终 anthropic-beta header（先于 body sanitize 与 CCH 签名）===
 	// 顺序约束同 buildUpstreamRequest。
 	ctEffectiveDropSet := mergeDropSets(s.getBetaPolicyFilterSet(ctx, c, account, modelID))
-	finalBetaHeader, finalBetaShouldSet := s.computeFinalCountTokensAnthropicBeta(
-		tokenType, mimicClaudeCode, modelID, clientHeaders, body, ctEffectiveDropSet,
-	)
+	finalBetaHeader := ""
+	finalBetaShouldSet := false
+	if !mode.transparentOAuth {
+		finalBetaHeader, finalBetaShouldSet = s.computeFinalCountTokensAnthropicBeta(
+			tokenType, mode.mimicClaudeCode, modelID, clientHeaders, body, ctEffectiveDropSet,
+		)
 
-	// 能力维度 body sanitize：与最终 anthropic-beta header 对称
-	if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, finalBetaHeader); changed {
-		body = sanitized
+		// 能力维度 body sanitize：与最终 anthropic-beta header 对称
+		if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, finalBetaHeader); changed {
+			body = sanitized
+		}
 	}
 
-	if ctEnableCCH {
+	if ctEnableCCH && !mode.transparentOAuth {
 		body = signBillingHeaderCCH(body)
 	}
 	body = sanitizeCountTokensRequestBody(body)
@@ -9630,7 +9665,7 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	}
 
 	// OAuth 账号：应用指纹到请求头（受设置开关控制）
-	if ctEnableFP && ctFingerprint != nil {
+	if ctEnableFP && ctFingerprint != nil && !mode.transparentOAuth {
 		s.identityService.ApplyFingerprint(req, ctFingerprint)
 	}
 
@@ -9641,19 +9676,21 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	if getHeaderRaw(req.Header, "anthropic-version") == "" {
 		setHeaderRaw(req.Header, "anthropic-version", "2023-06-01")
 	}
-	if tokenType == "oauth" {
+	if tokenType == "oauth" && !mode.transparentOAuth {
 		applyClaudeOAuthHeaderDefaults(req)
 	}
 
 	// OAuth + mimic Claude Code：强制注入 CLI 指纹 header
-	if tokenType == "oauth" && mimicClaudeCode {
+	if tokenType == "oauth" && mode.mimicClaudeCode {
 		applyClaudeCodeMimicHeaders(req, false)
 	}
 
-	// 写入最终 anthropic-beta header（Del 一次避免白名单透传值残留）
-	deleteHeaderAllForms(req.Header, "anthropic-beta")
-	if finalBetaShouldSet {
-		setHeaderRaw(req.Header, "anthropic-beta", finalBetaHeader)
+	if !mode.transparentOAuth {
+		// 写入最终 anthropic-beta header（Del 一次避免白名单透传值残留）
+		deleteHeaderAllForms(req.Header, "anthropic-beta")
+		if finalBetaShouldSet {
+			setHeaderRaw(req.Header, "anthropic-beta", finalBetaHeader)
+		}
 	}
 
 	// 同步 X-Claude-Code-Session-Id 头：取 body 中已处理的 metadata.user_id 的 session_id 覆盖
@@ -9666,10 +9703,10 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	}
 
 	if c != nil && tokenType == "oauth" {
-		c.Set(claudeMimicDebugInfoKey, buildClaudeMimicDebugLine(req, body, account, tokenType, mimicClaudeCode))
+		c.Set(claudeMimicDebugInfoKey, buildClaudeMimicDebugLine(req, body, account, tokenType, mode))
 	}
 	if s.debugClaudeMimicEnabled() {
-		logClaudeMimicDebug(req, body, account, tokenType, mimicClaudeCode)
+		logClaudeMimicDebug(req, body, account, tokenType, mode)
 	}
 
 	return req, nil

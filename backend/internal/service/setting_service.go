@@ -108,6 +108,7 @@ type cachedGatewayForwardingSettings struct {
 	cchSigning                   bool
 	anthropicCacheTTL1hInjection bool
 	rewriteMessageCacheControl   bool
+	claudeCodeOAuthMimicry       bool
 	expiresAt                    int64 // unix nano
 }
 
@@ -1895,6 +1896,7 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyEnableCCHSigning] = strconv.FormatBool(settings.EnableCCHSigning)
 	updates[SettingKeyEnableAnthropicCacheTTL1hInjection] = strconv.FormatBool(settings.EnableAnthropicCacheTTL1hInjection)
 	updates[SettingKeyRewriteMessageCacheControl] = strconv.FormatBool(settings.RewriteMessageCacheControl)
+	updates[SettingKeyEnableClaudeCodeOAuthMimicry] = strconv.FormatBool(settings.EnableClaudeCodeOAuthMimicry)
 	updates[SettingKeyAntigravityUserAgentVersion] = antigravity.NormalizeUserAgentVersion(settings.AntigravityUserAgentVersion)
 	updates[SettingKeyOpenAICodexUserAgent] = strings.TrimSpace(settings.OpenAICodexUserAgent)
 	updates[SettingKeyOpenAIAllowClaudeCodeCodexPlugin] = strconv.FormatBool(settings.OpenAIAllowClaudeCodeCodexPlugin)
@@ -2022,6 +2024,7 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 		cchSigning:                   settings.EnableCCHSigning,
 		anthropicCacheTTL1hInjection: settings.EnableAnthropicCacheTTL1hInjection,
 		rewriteMessageCacheControl:   settings.RewriteMessageCacheControl,
+		claudeCodeOAuthMimicry:       settings.EnableClaudeCodeOAuthMimicry,
 		expiresAt:                    time.Now().Add(gatewayForwardingCacheTTL).UnixNano(),
 	})
 	s.antigravityUAVersionSF.Forget("antigravity_user_agent_version")
@@ -2226,7 +2229,7 @@ func (s *SettingService) IsBackendModeEnabled(ctx context.Context) bool {
 }
 
 type gatewayForwardingSettingsResult struct {
-	fp, mp, cch, cacheTTL1h, rewriteMessageCacheControl bool
+	fp, mp, cch, cacheTTL1h, rewriteMessageCacheControl, claudeCodeOAuthMimicry bool
 }
 
 func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context) gatewayForwardingSettingsResult {
@@ -2238,6 +2241,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 				cch:                        cached.cchSigning,
 				cacheTTL1h:                 cached.anthropicCacheTTL1hInjection,
 				rewriteMessageCacheControl: cached.rewriteMessageCacheControl,
+				claudeCodeOAuthMimicry:     cached.claudeCodeOAuthMimicry,
 			}
 		}
 	}
@@ -2250,6 +2254,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 					cch:                        cached.cchSigning,
 					cacheTTL1h:                 cached.anthropicCacheTTL1hInjection,
 					rewriteMessageCacheControl: cached.rewriteMessageCacheControl,
+					claudeCodeOAuthMimicry:     cached.claudeCodeOAuthMimicry,
 				}, nil
 			}
 		}
@@ -2261,6 +2266,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 			SettingKeyEnableCCHSigning,
 			SettingKeyEnableAnthropicCacheTTL1hInjection,
 			SettingKeyRewriteMessageCacheControl,
+			SettingKeyEnableClaudeCodeOAuthMimicry,
 		})
 		if err != nil {
 			slog.Warn("failed to get gateway forwarding settings", "error", err)
@@ -2270,9 +2276,10 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 				cchSigning:                   false,
 				anthropicCacheTTL1hInjection: false,
 				rewriteMessageCacheControl:   s.defaultRewriteMessageCacheControl(),
+				claudeCodeOAuthMimicry:       true,
 				expiresAt:                    time.Now().Add(gatewayForwardingErrorTTL).UnixNano(),
 			})
-			return gatewayForwardingSettingsResult{fp: true, rewriteMessageCacheControl: s.defaultRewriteMessageCacheControl()}, nil
+			return gatewayForwardingSettingsResult{fp: true, rewriteMessageCacheControl: s.defaultRewriteMessageCacheControl(), claudeCodeOAuthMimicry: true}, nil
 		}
 		fp := true
 		if v, ok := values[SettingKeyEnableFingerprintUnification]; ok && v != "" {
@@ -2285,12 +2292,17 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 		if v, ok := values[SettingKeyRewriteMessageCacheControl]; ok && v != "" {
 			rewriteMessageCacheControl = v == "true"
 		}
+		claudeCodeOAuthMimicry := true
+		if v, ok := values[SettingKeyEnableClaudeCodeOAuthMimicry]; ok && v != "" {
+			claudeCodeOAuthMimicry = v == "true"
+		}
 		gatewayForwardingCache.Store(&cachedGatewayForwardingSettings{
 			fingerprintUnification:       fp,
 			metadataPassthrough:          mp,
 			cchSigning:                   cch,
 			anthropicCacheTTL1hInjection: cacheTTL1h,
 			rewriteMessageCacheControl:   rewriteMessageCacheControl,
+			claudeCodeOAuthMimicry:       claudeCodeOAuthMimicry,
 			expiresAt:                    time.Now().Add(gatewayForwardingCacheTTL).UnixNano(),
 		})
 		return gatewayForwardingSettingsResult{
@@ -2299,12 +2311,13 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 			cch:                        cch,
 			cacheTTL1h:                 cacheTTL1h,
 			rewriteMessageCacheControl: rewriteMessageCacheControl,
+			claudeCodeOAuthMimicry:     claudeCodeOAuthMimicry,
 		}, nil
 	})
 	if r, ok := val.(gatewayForwardingSettingsResult); ok {
 		return r
 	}
-	return gatewayForwardingSettingsResult{fp: true}
+	return gatewayForwardingSettingsResult{fp: true, claudeCodeOAuthMimicry: true}
 }
 
 // GetGatewayForwardingSettings returns cached gateway forwarding settings.
@@ -2323,6 +2336,14 @@ func (s *SettingService) IsAnthropicCacheTTL1hInjectionEnabled(ctx context.Conte
 // IsRewriteMessageCacheControlEnabled 检查是否启用 messages cache_control 改写。
 func (s *SettingService) IsRewriteMessageCacheControlEnabled(ctx context.Context) bool {
 	return s.getGatewayForwardingSettingsCached(ctx).rewriteMessageCacheControl
+}
+
+// IsClaudeCodeOAuthMimicryEnabled checks whether non-Claude-Code OAuth requests should use Claude Code mimicry.
+func (s *SettingService) IsClaudeCodeOAuthMimicryEnabled(ctx context.Context) bool {
+	if s == nil {
+		return true
+	}
+	return s.getGatewayForwardingSettingsCached(ctx).claudeCodeOAuthMimicry
 }
 
 // IsEmailVerifyEnabled 检查是否开启邮件验证
@@ -2809,6 +2830,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyAllowUngroupedKeyScheduling:        "false",
 		SettingKeyEnableAnthropicCacheTTL1hInjection: "false",
 		SettingKeyRewriteMessageCacheControl:         strconv.FormatBool(s.defaultRewriteMessageCacheControl()),
+		SettingKeyEnableClaudeCodeOAuthMimicry:       "true",
 		SettingKeyAntigravityUserAgentVersion:        "",
 		SettingKeyOpenAICodexUserAgent:               "",
 		SettingPaymentVisibleMethodAlipaySource:      "",
@@ -3328,6 +3350,11 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 		result.RewriteMessageCacheControl = v == "true"
 	} else {
 		result.RewriteMessageCacheControl = s.defaultRewriteMessageCacheControl()
+	}
+	if v, ok := settings[SettingKeyEnableClaudeCodeOAuthMimicry]; ok && v != "" {
+		result.EnableClaudeCodeOAuthMimicry = v == "true"
+	} else {
+		result.EnableClaudeCodeOAuthMimicry = true
 	}
 	result.AntigravityUserAgentVersion = antigravity.NormalizeUserAgentVersion(settings[SettingKeyAntigravityUserAgentVersion])
 	result.OpenAICodexUserAgent = strings.TrimSpace(settings[SettingKeyOpenAICodexUserAgent])

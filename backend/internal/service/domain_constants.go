@@ -425,6 +425,8 @@ const (
 	SettingKeyEnableAnthropicCacheTTL1hInjection = "enable_anthropic_cache_ttl_1h_injection"
 	// SettingKeyRewriteMessageCacheControl 是否改写 messages[*].content[*].cache_control（默认 false）
 	SettingKeyRewriteMessageCacheControl = "rewrite_message_cache_control"
+	// SettingKeyEnableClaudeCodeOAuthMimicry 是否对非 Claude Code 客户端的 OAuth 请求启用 Claude Code 伪装（默认 true）
+	SettingKeyEnableClaudeCodeOAuthMimicry = "enable_claude_code_oauth_mimicry"
 	// SettingKeyAntigravityUserAgentVersion Antigravity 上游 User-Agent 版本号（空值使用环境变量/默认值）
 	SettingKeyAntigravityUserAgentVersion = "antigravity_user_agent_version"
 	// SettingKeyOpenAICodexUserAgent OpenAI Codex 完整 User-Agent（空值使用内置默认）

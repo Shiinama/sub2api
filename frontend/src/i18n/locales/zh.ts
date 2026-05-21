@@ -5774,6 +5774,8 @@ export default {
         anthropicCacheTTL1hInjectionHint: '开启后，对 Anthropic OAuth/Setup Token 请求体中已有的 ephemeral 缓存块强制写入 1h；响应 usage 默认按 5m 回写计费，账号级 TTL 计费设置优先。',
         rewriteMessageCacheControl: '改写消息缓存断点',
         rewriteMessageCacheControlHint: '默认关闭，保留客户端在 messages 内容块中的 cache_control。开启后会清除客户端断点并注入代理断点，适合不自行管理缓存策略的客户端。',
+        claudeCodeOAuthMimicry: 'Claude Code OAuth 伪装',
+        claudeCodeOAuthMimicryHint: '默认开启，非 Claude Code 客户端使用 Anthropic OAuth 账号时会模拟 Claude Code。关闭后最大化透传客户端请求，但可能被 Anthropic 上游拒绝或走非预期额度。',
         antigravityUserAgentVersion: 'Antigravity UA 版本',
         antigravityUserAgentVersionPlaceholder: '1.23.2',
         antigravityUserAgentVersionHint: '留空时使用 ANTIGRAVITY_USER_AGENT_VERSION 或内置默认值 1.23.2；填写后后台设置优先。',

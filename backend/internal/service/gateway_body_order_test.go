@@ -13,7 +13,8 @@ import (
 )
 
 type gatewayTTLSettingRepo struct {
-	data map[string]string
+	data           map[string]string
+	getMultipleErr error
 }
 
 func (r *gatewayTTLSettingRepo) Get(context.Context, string) (*Setting, error) {
@@ -43,6 +44,9 @@ func (r *gatewayTTLSettingRepo) Set(_ context.Context, key, value string) error 
 }
 
 func (r *gatewayTTLSettingRepo) GetMultiple(_ context.Context, keys []string) (map[string]string, error) {
+	if r != nil && r.getMultipleErr != nil {
+		return nil, r.getMultipleErr
+	}
 	result := make(map[string]string)
 	if r == nil {
 		return result, nil
