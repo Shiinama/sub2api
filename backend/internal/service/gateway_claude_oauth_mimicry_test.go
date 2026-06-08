@@ -88,7 +88,7 @@ func TestGatewayService_ForwardTransparentOAuthPreservesSystemAndMessages(t *tes
 	resetGatewayForwardingCacheForTest(t)
 
 	body := []byte(`{"model":"claude-3-7-sonnet-20250219","system":"client system","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
-	parsed, err := ParseGatewayRequest(body, PlatformAnthropic)
+	parsed, err := ParseGatewayRequest(NewRequestBodyRef(body), PlatformAnthropic)
 	require.NoError(t, err)
 
 	rec := httptest.NewRecorder()
@@ -244,7 +244,7 @@ func TestBuildUpstreamRequest_TransparentOAuthPreservesClientHeadersAndBody(t *t
 	}
 	account := &Account{ID: 10, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
 
-	req, err := svc.buildUpstreamRequest(context.Background(), c, account, body, "oauth-token", "oauth", "claude-3-7-sonnet-20250219", false, claudeUpstreamForwardingMode{transparentOAuth: true})
+	req, _, err := svc.buildUpstreamRequest(context.Background(), c, account, body, "oauth-token", "oauth", "claude-3-7-sonnet-20250219", false, claudeUpstreamForwardingMode{transparentOAuth: true})
 	require.NoError(t, err)
 
 	require.Equal(t, "Bearer oauth-token", getHeaderRaw(req.Header, "authorization"))
@@ -274,7 +274,7 @@ func TestBuildUpstreamRequest_MimicOAuthForcesClaudeCodeHeadersAndBetas(t *testi
 	}
 	account := &Account{ID: 10, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
 
-	req, err := svc.buildUpstreamRequest(context.Background(), c, account, []byte(`{"model":"claude-3-7-sonnet-20250219"}`), "oauth-token", "oauth", "claude-3-7-sonnet-20250219", false, claudeUpstreamForwardingMode{mimicClaudeCode: true})
+	req, _, err := svc.buildUpstreamRequest(context.Background(), c, account, []byte(`{"model":"claude-3-7-sonnet-20250219"}`), "oauth-token", "oauth", "claude-3-7-sonnet-20250219", false, claudeUpstreamForwardingMode{mimicClaudeCode: true})
 	require.NoError(t, err)
 
 	require.Contains(t, getHeaderRaw(req.Header, "User-Agent"), "claude-cli/")
@@ -297,7 +297,7 @@ func TestBuildCountTokensRequest_TransparentOAuthPreservesClientBeta(t *testing.
 	}
 	account := &Account{ID: 10, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
 
-	req, err := svc.buildCountTokensRequest(context.Background(), c, account, []byte(`{"model":"claude-3-7-sonnet-20250219"}`), "oauth-token", "oauth", "claude-3-7-sonnet-20250219", claudeUpstreamForwardingMode{transparentOAuth: true})
+	req, _, err := svc.buildCountTokensRequest(context.Background(), c, account, []byte(`{"model":"claude-3-7-sonnet-20250219"}`), "oauth-token", "oauth", "claude-3-7-sonnet-20250219", claudeUpstreamForwardingMode{transparentOAuth: true})
 	require.NoError(t, err)
 
 	require.Equal(t, "opencode/1.0", getHeaderRaw(req.Header, "User-Agent"))
