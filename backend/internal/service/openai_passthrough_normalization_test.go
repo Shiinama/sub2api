@@ -1,6 +1,8 @@
 package service
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -30,4 +32,25 @@ func TestNormalizeOpenAIPassthroughOAuthBody_CompactRemovesUnsupportedUser(t *te
 	require.False(t, gjson.GetBytes(normalized, "metadata").Exists())
 	require.False(t, gjson.GetBytes(normalized, "stream").Exists())
 	require.False(t, gjson.GetBytes(normalized, "store").Exists())
+}
+
+func TestNormalizeOpenAIPassthroughOAuthBody_MissingInstructionsUsesMinimalDefault(t *testing.T) {
+	for _, model := range []string{"gpt-5.5", "gpt-5.2", "gpt-5.1-codex-max", "codex-auto-review"} {
+		t.Run(model, func(t *testing.T) {
+			body := []byte(fmt.Sprintf(`{"model":%q,"input":"hello"}`, model))
+
+			normalized, changed, err := normalizeOpenAIPassthroughOAuthBody(body, false)
+			require.NoError(t, err)
+			require.True(t, changed)
+			require.Equal(t, "You are a helpful assistant.", strings.TrimSpace(gjson.GetBytes(normalized, "instructions").String()))
+		})
+	}
+}
+
+func TestNormalizeOpenAIPassthroughOAuthBody_PreservesInstructions(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.5","input":"hello","instructions":"client instructions"}`)
+
+	normalized, _, err := normalizeOpenAIPassthroughOAuthBody(body, false)
+	require.NoError(t, err)
+	require.Equal(t, "client instructions", gjson.GetBytes(normalized, "instructions").String())
 }

@@ -57,6 +57,11 @@ var instructionsGPT51 string
 //go:embed instructions_gpt5_2.txt
 var instructionsGPT52 string
 
+// GPTInstructions is the minimal default prompt for selected GPT requests.
+//
+//go:embed instructions_gpt.txt
+var GPTInstructions string
+
 // CodexBaseInstructionsForModel 按模型返回最匹配的真实 Codex base instructions：
 //   - 含 "codex" 的模型（gpt-5-codex / gpt-5.x-codex / codex-max / spark 等）→ GPT-5-Codex prompt
 //   - gpt-5.2 系非 codex 模型 → GPT-5.2 prompt
