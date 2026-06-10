@@ -30,6 +30,8 @@ RUN pnpm install --frozen-lockfile
 
 # Copy frontend source and build
 COPY frontend/ ./
+# Copy legal docs referenced by Vite raw imports from frontend source.
+COPY docs/legal/admin-compliance.*.md /app/docs/legal/
 RUN pnpm run build
 
 # -----------------------------------------------------------------------------
