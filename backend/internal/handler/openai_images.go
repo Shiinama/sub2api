@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
@@ -50,6 +49,10 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 
 	body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
 	if err != nil {
+		logOpenAIImagesRequestContextCanceled(c, reqLog, c.Request.Context().Err(), openAIImagesRequestCancelLogFields{
+			Phase: "reading_body",
+			Start: requestStart,
+		})
 		if maxErr, ok := extractMaxBytesError(err); ok {
 			h.errorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
 			return
@@ -62,11 +65,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		return
 	}
 
-	if isMultipartImagesContentType(c.GetHeader("Content-Type")) {
-		setOpsRequestContext(c, "", false)
-	} else {
-		setOpsRequestContext(c, "", false)
-	}
+	setOpsRequestContext(c, "", false)
 
 	parsed, err := h.gatewayService.ParseOpenAIImagesRequest(c, body)
 	if err != nil {
@@ -98,11 +97,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		defer imageReleaseFunc()
 	}
 
-	if parsed.Multipart {
-		setOpsRequestContext(c, requestModel, parsed.Stream)
-	} else {
-		setOpsRequestContext(c, requestModel, parsed.Stream)
-	}
+	setOpsRequestContext(c, requestModel, parsed.Stream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(parsed.Stream, false)))
 
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, requestModel)
@@ -217,6 +212,14 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			service.SetOpsLatencyMs(c, service.OpsTimeToFirstTokenMsKey, int64(*result.FirstTokenMs))
 		}
 		if err != nil {
+			logOpenAIImagesRequestContextCanceled(c, reqLog, requestCtx.Err(), openAIImagesRequestCancelLogFields{
+				Phase:     "waiting_upstream",
+				Start:     requestStart,
+				Model:     requestModel,
+				Stream:    parsed.Stream,
+				AccountID: account.ID,
+				Platform:  account.Platform,
+			})
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai.images.forward_partial_error_with_image_result",
 					zap.Int64("account_id", account.ID),
@@ -251,6 +254,14 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 							)
 							select {
 							case <-requestCtx.Done():
+								logOpenAIImagesRequestContextCanceled(c, reqLog, requestCtx.Err(), openAIImagesRequestCancelLogFields{
+									Phase:     "retry_backoff",
+									Start:     requestStart,
+									Model:     requestModel,
+									Stream:    parsed.Stream,
+									AccountID: account.ID,
+									Platform:  account.Platform,
+								})
 								return
 							case <-time.After(sameAccountRetryDelay):
 							}
@@ -351,8 +362,4 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		)
 		return
 	}
-}
-
-func isMultipartImagesContentType(contentType string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/form-data")
 }

@@ -211,6 +211,56 @@ func TestLogger_AccessLogUsesForwardedClientIP(t *testing.T) {
 	t.Fatalf("access log event not found")
 }
 
+func TestLogger_AccessLogIncludesIngressMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	sink := initMiddlewareTestLogger(t)
+
+	r := gin.New()
+	r.Use(Logger())
+	r.POST("/v1/images/edits", func(c *gin.Context) {
+		c.Status(http.StatusBadGateway)
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", nil)
+	req.Host = "parallelfuture-ai.up.railway.app"
+	req.Header.Set("X-Forwarded-Host", "parallelfuture.ai")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Railway-Request-Id", "railway-rid")
+	req.Header.Set("X-Railway-Edge-Request-Id", "edge-rid\r\n")
+	req.Header.Set("Authorization", "Bearer should-not-be-logged")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d", w.Code)
+	}
+
+	for _, event := range sink.list() {
+		if event == nil || event.Message != "http request completed" {
+			continue
+		}
+		if got := event.Fields["host"]; got != "parallelfuture-ai.up.railway.app" {
+			t.Fatalf("host=%q", got)
+		}
+		if got := event.Fields["forwarded_host"]; got != "parallelfuture.ai" {
+			t.Fatalf("forwarded_host=%q", got)
+		}
+		if got := event.Fields["forwarded_proto"]; got != "https" {
+			t.Fatalf("forwarded_proto=%q", got)
+		}
+		if got := event.Fields["railway_request_id"]; got != "railway-rid" {
+			t.Fatalf("railway_request_id=%q", got)
+		}
+		if got := event.Fields["railway_edge_request_id"]; got != "edge-rid" {
+			t.Fatalf("railway_edge_request_id=%q", got)
+		}
+		if _, ok := event.Fields["authorization"]; ok {
+			t.Fatalf("authorization should not be logged: %+v", event.Fields)
+		}
+		return
+	}
+	t.Fatalf("access log event not found")
+}
+
 func TestLogger_HealthPathSkipped(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	sink := initMiddlewareTestLogger(t)

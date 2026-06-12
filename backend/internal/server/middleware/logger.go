@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
@@ -47,6 +48,7 @@ func Logger() gin.HandlerFunc {
 			zap.String("method", method),
 			zap.String("path", path),
 		}
+		fields = appendAccessIngressFields(fields, c)
 		if hasAccountID && accountID > 0 {
 			fields = append(fields, zap.Int64("account_id", accountID))
 		}
@@ -64,4 +66,30 @@ func Logger() gin.HandlerFunc {
 			l.Warn("http request contains gin errors", zap.String("errors", c.Errors.String()))
 		}
 	}
+}
+
+func appendAccessIngressFields(fields []zap.Field, c *gin.Context) []zap.Field {
+	if c == nil || c.Request == nil {
+		return fields
+	}
+	if host := pkghttputil.SanitizeHeaderValueForLog(c.Request.Host); host != "" {
+		fields = append(fields, zap.String("host", host))
+	}
+	headerFields := []struct {
+		field  string
+		header string
+	}{
+		{"forwarded_host", "X-Forwarded-Host"},
+		{"forwarded_proto", "X-Forwarded-Proto"},
+		{"railway_request_id", "X-Railway-Request-Id"},
+		{"railway_edge_request_id", "X-Railway-Edge-Request-Id"},
+	}
+	for _, item := range headerFields {
+		value := pkghttputil.SanitizeHeaderValueForLog(c.GetHeader(item.header))
+		if value == "" {
+			continue
+		}
+		fields = append(fields, zap.String(item.field, value))
+	}
+	return fields
 }
