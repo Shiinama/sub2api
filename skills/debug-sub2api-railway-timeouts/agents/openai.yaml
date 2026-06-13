@@ -1,0 +1,4 @@
+interface:
+  display_name: "Debug Sub2API Railway Timeouts"
+  short_description: "Diagnose Railway 300s image timeout failures"
+  default_prompt: "Use $debug-sub2api-railway-timeouts to investigate Sub2API Railway 502/context canceled image errors."
