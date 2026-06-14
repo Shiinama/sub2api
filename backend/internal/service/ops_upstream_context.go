@@ -11,10 +11,11 @@ import (
 // Gin context keys used by Ops error logger for capturing upstream error details.
 // These keys are set by gateway services and consumed by handler/ops_error_logger.go.
 const (
-	OpsUpstreamStatusCodeKey   = "ops_upstream_status_code"
-	OpsUpstreamErrorMessageKey = "ops_upstream_error_message"
-	OpsUpstreamErrorDetailKey  = "ops_upstream_error_detail"
-	OpsUpstreamErrorsKey       = "ops_upstream_errors"
+	OpsUpstreamStatusCodeKey      = "ops_upstream_status_code"
+	OpsUpstreamErrorMessageKey    = "ops_upstream_error_message"
+	OpsUpstreamErrorDetailKey     = "ops_upstream_error_detail"
+	OpsUpstreamErrorsKey          = "ops_upstream_errors"
+	OpsUpstreamHeadersReceivedKey = "ops_upstream_headers_received"
 
 	// Optional stage latencies (milliseconds) for troubleshooting and alerting.
 	OpsAuthLatencyMsKey      = "ops_auth_latency_ms"
@@ -63,6 +64,32 @@ func SetOpsLatencyMs(c *gin.Context, key string, value int64) {
 		return
 	}
 	c.Set(key, value)
+}
+
+func MarkOpsUpstreamHeadersReceived(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set(OpsUpstreamHeadersReceivedKey, true)
+}
+
+func ResetOpsUpstreamHeadersReceived(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set(OpsUpstreamHeadersReceivedKey, false)
+}
+
+func HasOpsUpstreamHeadersReceived(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	v, ok := c.Get(OpsUpstreamHeadersReceivedKey)
+	if !ok {
+		return false
+	}
+	received, _ := v.(bool)
+	return received
 }
 
 func MarkOpsClientBusinessLimited(c *gin.Context, reason string) {

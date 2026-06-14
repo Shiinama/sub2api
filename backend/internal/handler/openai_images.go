@@ -212,13 +212,24 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			service.SetOpsLatencyMs(c, service.OpsTimeToFirstTokenMsKey, int64(*result.FirstTokenMs))
 		}
 		if err != nil {
+			writerSizeAtError := c.Writer.Size()
+			appResponseBytesWritten := writerSizeAtError
+			if appResponseBytesWritten < 0 {
+				appResponseBytesWritten = 0
+			}
+			appResponseStarted := c.Writer.Written() || writerSizeAtError != writerSizeBeforeForward
 			logOpenAIImagesRequestContextCanceled(c, reqLog, requestCtx.Err(), openAIImagesRequestCancelLogFields{
-				Phase:     "waiting_upstream",
-				Start:     requestStart,
-				Model:     requestModel,
-				Stream:    parsed.Stream,
-				AccountID: account.ID,
-				Platform:  account.Platform,
+				Phase:                   "waiting_upstream",
+				Start:                   requestStart,
+				Model:                   requestModel,
+				Stream:                  parsed.Stream,
+				AccountID:               account.ID,
+				Platform:                account.Platform,
+				AppResponseStarted:      appResponseStarted,
+				AppResponseBytesWritten: appResponseBytesWritten,
+				UpstreamStarted:         upstreamLatencyMs > 0,
+				UpstreamHeadersReceived: service.HasOpsUpstreamHeadersReceived(c),
+				UpstreamLatencyMs:       upstreamLatencyMs,
 			})
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai.images.forward_partial_error_with_image_result",

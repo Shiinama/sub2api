@@ -42,11 +42,16 @@ func TestImagesRequestCancelLoggerLogsCancelMetadata(t *testing.T) {
 
 	cancel()
 	logOpenAIImagesRequestContextCanceled(c, baseLog, c.Request.Context().Err(), openAIImagesRequestCancelLogFields{
-		Phase:     "waiting_upstream",
-		Start:     time.Now().Add(-35 * time.Second),
-		Model:     "gpt-image-2",
-		AccountID: 16,
-		Platform:  "openai",
+		Phase:                   "waiting_upstream",
+		Start:                   time.Now().Add(-35 * time.Second),
+		Model:                   "gpt-image-2",
+		AccountID:               16,
+		Platform:                "openai",
+		AppResponseStarted:      false,
+		AppResponseBytesWritten: 0,
+		UpstreamStarted:         true,
+		UpstreamHeadersReceived: false,
+		UpstreamLatencyMs:       35000,
 	})
 
 	var eventFields map[string]any
@@ -70,5 +75,83 @@ func TestImagesRequestCancelLoggerLogsCancelMetadata(t *testing.T) {
 	require.Equal(t, "gpt-image-2", eventFields["model"])
 	require.Equal(t, "openai", eventFields["platform"])
 	require.Equal(t, "16", fmt.Sprint(eventFields["account_id"]))
+	require.Equal(t, false, eventFields["app_response_started"])
+	require.Equal(t, "0", fmt.Sprint(eventFields["app_response_bytes_written"]))
+	require.Equal(t, true, eventFields["upstream_started"])
+	require.Equal(t, false, eventFields["upstream_headers_received"])
+	require.Equal(t, "35000", fmt.Sprint(eventFields["upstream_latency_ms"]))
+	require.Equal(t, "downstream", eventFields["termination_actor"])
+	require.Equal(t, "downstream_closed_before_app_response", eventFields["termination_cause"])
+	require.Equal(t, "medium", eventFields["termination_confidence"])
+	require.Contains(t, fmt.Sprint(eventFields["termination_evidence"]), "no_app_response_started")
+	require.Contains(t, fmt.Sprint(eventFields["termination_evidence"]), "no_upstream_headers")
 	require.NotContains(t, eventFields, "authorization")
+}
+
+func TestClassifyOpenAIImagesCancellation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	withRailwayRequestID := func() *gin.Context {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", nil)
+		req.Header.Set("X-Railway-Request-Id", "railway-rid")
+		c.Request = req
+		return c
+	}
+
+	tests := []struct {
+		name           string
+		data           openAIImagesRequestCancelLogFields
+		elapsedMs      int64
+		wantActor      string
+		wantCause      string
+		wantConfidence string
+	}{
+		{
+			name: "waiting upstream near 300s is railway first byte timeout",
+			data: openAIImagesRequestCancelLogFields{
+				Phase:                   "waiting_upstream",
+				AppResponseStarted:      false,
+				UpstreamStarted:         true,
+				UpstreamHeadersReceived: false,
+			},
+			elapsedMs:      299971,
+			wantActor:      "railway_edge",
+			wantCause:      "edge_first_byte_timeout_300s",
+			wantConfidence: "high",
+		},
+		{
+			name: "reading body near 300s is railway body read timeout",
+			data: openAIImagesRequestCancelLogFields{
+				Phase:              "reading_body",
+				AppResponseStarted: false,
+			},
+			elapsedMs:      300010,
+			wantActor:      "railway_edge",
+			wantCause:      "edge_body_read_timeout_300s",
+			wantConfidence: "high",
+		},
+		{
+			name: "early cancellation is downstream but not attributed to railway edge",
+			data: openAIImagesRequestCancelLogFields{
+				Phase:              "waiting_upstream",
+				AppResponseStarted: false,
+				UpstreamStarted:    true,
+			},
+			elapsedMs:      120000,
+			wantActor:      "downstream",
+			wantCause:      "downstream_closed_before_app_response",
+			wantConfidence: "medium",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyOpenAIImagesCancellation(withRailwayRequestID(), context.Canceled, tt.data, tt.elapsedMs)
+			require.Equal(t, tt.wantActor, got.Actor)
+			require.Equal(t, tt.wantCause, got.Cause)
+			require.Equal(t, tt.wantConfidence, got.Confidence)
+		})
+	}
 }

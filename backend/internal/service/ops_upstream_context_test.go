@@ -1,8 +1,11 @@
 package service
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,4 +28,18 @@ func TestSafeUpstreamURL(t *testing.T) {
 			require.Equal(t, tt.want, safeUpstreamURL(tt.input))
 		})
 	}
+}
+
+func TestOpsUpstreamHeadersReceivedCanBeResetBetweenAttempts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/edits", nil)
+
+	MarkOpsUpstreamHeadersReceived(c)
+	require.True(t, HasOpsUpstreamHeadersReceived(c))
+
+	ResetOpsUpstreamHeadersReceived(c)
+	require.False(t, HasOpsUpstreamHeadersReceived(c))
 }
