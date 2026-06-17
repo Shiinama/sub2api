@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
 	"github.com/imroc/req/v3"
 	"github.com/stretchr/testify/require"
@@ -32,6 +33,37 @@ func (w *failingOpenAIImageWriter) Write(p []byte) (int, error) {
 	}
 	w.writes++
 	return w.ResponseWriter.Write(p)
+}
+
+type cancelingOpenAIImagesUpstream struct {
+	cancel              context.CancelFunc
+	resp                *http.Response
+	honorRequestContext bool
+	calls               int
+}
+
+func (u *cancelingOpenAIImagesUpstream) Do(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
+	u.calls++
+	if req != nil && req.Body != nil {
+		b, _ := io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		req.Body = io.NopCloser(bytes.NewReader(b))
+	}
+	if u.cancel != nil {
+		u.cancel()
+	}
+	if u.honorRequestContext && req != nil {
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		default:
+		}
+	}
+	return u.resp, nil
+}
+
+func (u *cancelingOpenAIImagesUpstream) DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.Do(req, proxyURL, accountID, accountConcurrency)
 }
 
 func TestOpenAIGatewayServiceParseOpenAIImagesRequest_JSON(t *testing.T) {
@@ -820,6 +852,96 @@ func TestOpenAIGatewayServiceForwardImages_APIKeyGenerationUsesConfiguredV1BaseU
 	require.Equal(t, "gpt-image-2", gjson.GetBytes(upstream.lastBody, "model").String())
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "aGVsbG8=", gjson.Get(rec.Body.String(), "data.0.b64_json").String())
+}
+
+func TestOpenAIGatewayServiceForwardImages_APIKeyNonStreamDrainsAfterDownstreamCancel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat","response_format":"b64_json"}`)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+
+	upstream := &cancelingOpenAIImagesUpstream{
+		cancel:              cancel,
+		honorRequestContext: true,
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"application/json"},
+				"X-Request-Id": []string{"req_img_nonstream_disconnect"},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"created":1710000012,"usage":{"input_tokens":12,"output_tokens":21,"output_tokens_details":{"image_tokens":9}},"data":[{"b64_json":"aGVsbG8=","revised_prompt":"draw a cat"}]}`)),
+		},
+	}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
+	require.NoError(t, err)
+
+	account := &Account{
+		ID:       8,
+		Name:     "openai-apikey",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key": "test-api-key",
+		},
+	}
+
+	result, err := svc.ForwardImages(ctx, c, account, body, parsed, "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 1, upstream.calls)
+	require.Equal(t, 1, result.ImageCount)
+	require.Equal(t, 12, result.Usage.InputTokens)
+	require.Equal(t, 21, result.Usage.OutputTokens)
+	require.Equal(t, 9, result.Usage.ImageOutputTokens)
+	require.Equal(t, 0, rec.Body.Len(), "downstream-canceled non-stream requests should not write the success body")
+}
+
+func TestOpenAIGatewayServiceForwardImages_APIKeyNonStreamCanceledBeforeUpstreamDoesNotSend(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat","response_format":"b64_json"}`)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+
+	upstream := &cancelingOpenAIImagesUpstream{
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"application/json"},
+				"X-Request-Id": []string{"req_img_precanceled"},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"created":1710000013,"data":[{"b64_json":"aGVsbG8="}]}`)),
+		},
+	}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
+	require.NoError(t, err)
+
+	account := &Account{
+		ID:       8,
+		Name:     "openai-apikey",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key": "test-api-key",
+		},
+	}
+
+	result, err := svc.ForwardImages(ctx, c, account, body, parsed, "")
+	require.Nil(t, result)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 0, upstream.calls)
 }
 
 func TestOpenAIGatewayServiceForwardImages_APIKeyResetsUpstreamHeadersBeforeAttempt(t *testing.T) {

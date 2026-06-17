@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
@@ -535,6 +536,43 @@ func normalizeOpenAIImageSizeTier(size string) string {
 	return NormalizeImageBillingTierOrDefault(size)
 }
 
+func openAIImagesUpstreamContext(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	if ctx == nil {
+		return context.Background(), func() {}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, func() {}, err
+	}
+	return context.WithoutCancel(ctx), func() {}, nil
+}
+
+func openAIImagesDownstreamContextErr(c *gin.Context) error {
+	if c == nil || c.Request == nil || c.Request.Context() == nil {
+		return nil
+	}
+	return c.Request.Context().Err()
+}
+
+func logOpenAIImagesDownstreamCanceledAfterUpstreamDrained(c *gin.Context, accountID int64, model, endpoint, upstreamRequestID string, imageCount int) {
+	if openAIImagesDownstreamContextErr(c) == nil {
+		return
+	}
+	requestID := ""
+	if c != nil && c.Request != nil && c.Request.Context() != nil {
+		requestID, _ = c.Request.Context().Value(ctxkey.RequestID).(string)
+	}
+	logger.LegacyPrintf(
+		"service.openai_gateway",
+		"openai.images.downstream_canceled_after_upstream_drained account_id=%d model=%s endpoint=%s image_count=%d request_id=%s upstream_request_id=%s",
+		accountID,
+		model,
+		endpoint,
+		imageCount,
+		requestID,
+		upstreamRequestID,
+	)
+}
+
 func (s *OpenAIGatewayService) ForwardImages(
 	ctx context.Context,
 	c *gin.Context,
@@ -588,13 +626,17 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 	if err != nil {
 		return nil, err
 	}
-	upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, parsed.Stream)
-	defer releaseUpstreamCtx()
 
-	token, _, err := s.GetAccessToken(upstreamCtx, account)
+	token, _, err := s.GetAccessToken(ctx, account)
 	if err != nil {
 		return nil, err
 	}
+	upstreamCtx, releaseUpstreamCtx, err := openAIImagesUpstreamContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseUpstreamCtx()
+
 	upstreamReq, err := s.buildOpenAIImagesRequest(upstreamCtx, c, account, forwardBody, forwardContentType, token, parsed.Endpoint)
 	if err != nil {
 		return nil, err
@@ -704,6 +746,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 		if nonStreamCount > 0 {
 			imageCount = nonStreamCount
 		}
+		logOpenAIImagesDownstreamCanceledAfterUpstreamDrained(c, account.ID, requestModel, parsed.Endpoint, resp.Header.Get("x-request-id"), imageCount)
 		return &OpenAIForwardResult{
 			RequestID:        resp.Header.Get("x-request-id"),
 			Usage:            usage,
@@ -862,14 +905,16 @@ func (s *OpenAIGatewayService) handleOpenAIImagesNonStreamingResponse(resp *http
 	if err != nil {
 		return OpenAIUsage{}, 0, nil, err
 	}
-	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
-	contentType := "application/json"
-	if s.cfg != nil && !s.cfg.Security.ResponseHeaders.Enabled {
-		if upstreamType := resp.Header.Get("Content-Type"); upstreamType != "" {
-			contentType = upstreamType
+	if openAIImagesDownstreamContextErr(c) == nil {
+		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+		contentType := "application/json"
+		if s.cfg != nil && !s.cfg.Security.ResponseHeaders.Enabled {
+			if upstreamType := resp.Header.Get("Content-Type"); upstreamType != "" {
+				contentType = upstreamType
+			}
 		}
+		c.Data(resp.StatusCode, contentType, body)
 	}
-	c.Data(resp.StatusCode, contentType, body)
 
 	usage, _ := extractOpenAIUsageFromJSONBytes(body)
 	return usage, extractOpenAIImageCountFromJSONBytes(body), collectOpenAIResponseImageOutputSizesFromJSONBytes(body), nil

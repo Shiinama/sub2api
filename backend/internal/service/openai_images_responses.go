@@ -922,8 +922,10 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthNonStreamingResponse(
 	if err != nil {
 		return OpenAIUsage{}, 0, nil, err
 	}
-	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
-	c.Data(resp.StatusCode, "application/json; charset=utf-8", responseBody)
+	if openAIImagesDownstreamContextErr(c) == nil {
+		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+		c.Data(resp.StatusCode, "application/json; charset=utf-8", responseBody)
+	}
 	return usage, len(results), openAIResponsesImageResultSizes(results), nil
 }
 
@@ -1301,10 +1303,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		account.Type,
 		len(parsed.Uploads),
 	)
-	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
-	defer releaseUpstreamCtx()
-
-	token, _, err := s.GetAccessToken(upstreamCtx, account)
+	token, _, err := s.GetAccessToken(ctx, account)
 	if err != nil {
 		return nil, err
 	}
@@ -1313,6 +1312,12 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 	if err != nil {
 		return nil, err
 	}
+	upstreamCtx, releaseUpstreamCtx, err := openAIImagesUpstreamContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseUpstreamCtx()
+
 	upstreamReq, err := s.buildUpstreamRequest(upstreamCtx, c, account, responsesBody, token, true, parsed.StickySessionSeed(), false)
 	if err != nil {
 		return nil, err
@@ -1408,6 +1413,9 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 	}
 	if imageCount <= 0 {
 		imageCount = parsed.N
+	}
+	if !parsed.Stream {
+		logOpenAIImagesDownstreamCanceledAfterUpstreamDrained(c, account.ID, requestModel, parsed.Endpoint, resp.Header.Get("x-request-id"), imageCount)
 	}
 	return &OpenAIForwardResult{
 		RequestID:        resp.Header.Get("x-request-id"),
