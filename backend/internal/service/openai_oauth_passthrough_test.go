@@ -29,6 +29,10 @@ type httpUpstreamRecorder struct {
 	requests []*http.Request
 	bodies   [][]byte
 
+	lastReqContextErrDuringDo error
+	lastReqDeadlineDuringDo   time.Time
+	lastReqDeadlineOKDuringDo bool
+
 	resp      *http.Response
 	responses []*http.Response
 	err       error
@@ -36,6 +40,10 @@ type httpUpstreamRecorder struct {
 
 func (u *httpUpstreamRecorder) Do(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
 	u.lastReq = req
+	if req != nil {
+		u.lastReqContextErrDuringDo = req.Context().Err()
+		u.lastReqDeadlineDuringDo, u.lastReqDeadlineOKDuringDo = req.Context().Deadline()
+	}
 	if req != nil && req.Body != nil {
 		b, _ := io.ReadAll(req.Body)
 		u.lastBody = b
@@ -195,6 +203,98 @@ func TestOpenAIGatewayService_OAuthMessagesBridgeDoesNotInjectDefaultInstruction
 	require.Empty(t, upstream.lastReq.Header.Get("Conversation_Id"))
 	require.Empty(t, upstream.lastReq.Header.Get("OpenAI-Beta"))
 	require.Empty(t, upstream.lastReq.Header.Get("originator"))
+}
+
+func TestOpenAIGatewayService_HTTPFallbackUsesBoundedDetachedUpstreamContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	parentCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	originalBody := []byte(`{"model":"gpt-5.5","stream":true,"input":[{"role":"user","content":"hi"}]}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(originalBody)).WithContext(parentCtx)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_bounded_context"}},
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"type":"invalid_request_error","message":"stop after capture"}}`)),
+	}}
+	svc := &OpenAIGatewayService{
+		cfg:          &config.Config{},
+		httpUpstream: upstream,
+	}
+	account := &Account{
+		ID:          123,
+		Name:        "acc",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token":       "oauth-token",
+			"chatgpt_account_id": "chatgpt-acc",
+		},
+		Status:      StatusActive,
+		Schedulable: true,
+	}
+
+	result, err := svc.Forward(parentCtx, c, account, originalBody)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.NotNil(t, upstream.lastReq)
+	require.NoError(t, upstream.lastReqContextErrDuringDo)
+	require.True(t, upstream.lastReqDeadlineOKDuringDo)
+	require.WithinDuration(t, time.Now().Add(detachedUpstreamRequestTimeout), upstream.lastReqDeadlineDuringDo, time.Second)
+}
+
+func TestOpenAIGatewayService_ResponsesChatFallbackUsesBoundedDetachedUpstreamContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	parentCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	originalBody := []byte(`{"model":"gpt-5.5","stream":false,"input":"hi"}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(originalBody)).WithContext(parentCtx)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_chat_fallback_bounded_context"}},
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"type":"invalid_request_error","message":"stop after capture"}}`)),
+	}}
+	svc := &OpenAIGatewayService{
+		cfg:          &config.Config{},
+		httpUpstream: upstream,
+	}
+	account := &Account{
+		ID:          124,
+		Name:        "api-key",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":  "sk-test",
+			"base_url": "https://upstream.example",
+		},
+		Extra: map[string]any{
+			openai_compat.ExtraKeyResponsesMode: string(openai_compat.ResponsesSupportModeForceChatCompletions),
+		},
+		Status:      StatusActive,
+		Schedulable: true,
+	}
+
+	result, err := svc.Forward(parentCtx, c, account, originalBody)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.NotNil(t, upstream.lastReq)
+	require.Equal(t, "https://upstream.example/v1/chat/completions", upstream.lastReq.URL.String())
+	require.NoError(t, upstream.lastReqContextErrDuringDo)
+	require.True(t, upstream.lastReqDeadlineOKDuringDo)
+	require.WithinDuration(t, time.Now().Add(detachedUpstreamRequestTimeout), upstream.lastReqDeadlineDuringDo, time.Second)
 }
 
 type openAIPassthroughFailoverRepo struct {
@@ -499,7 +599,9 @@ func TestOpenAIGatewayService_OAuthPassthrough_UpstreamRequestIgnoresClientCance
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, upstream.lastReq)
-	require.NoError(t, upstream.lastReq.Context().Err())
+	require.NoError(t, upstream.lastReqContextErrDuringDo)
+	require.True(t, upstream.lastReqDeadlineOKDuringDo)
+	require.WithinDuration(t, time.Now().Add(detachedUpstreamRequestTimeout), upstream.lastReqDeadlineDuringDo, time.Second)
 }
 
 func TestOpenAIGatewayService_OAuthPassthrough_MissingInstructionsUsesMinimalDefault(t *testing.T) {
@@ -635,7 +737,9 @@ func TestOpenAIGatewayService_OAuthLegacy_UpstreamRequestIgnoresClientCancel(t *
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, upstream.lastReq)
-	require.NoError(t, upstream.lastReq.Context().Err())
+	require.NoError(t, upstream.lastReqContextErrDuringDo)
+	require.True(t, upstream.lastReqDeadlineOKDuringDo)
+	require.WithinDuration(t, time.Now().Add(detachedUpstreamRequestTimeout), upstream.lastReqDeadlineDuringDo, time.Second)
 }
 
 func TestOpenAIGatewayService_OAuthLegacy_CompositeCodexUAUsesCodexOriginator(t *testing.T) {

@@ -168,6 +168,9 @@ func TestOpenAIWSHTTPBridgeRelaysSSEFramesAsWebSocketMessages(t *testing.T) {
 
 	require.NotNil(t, upstream.lastReq)
 	require.Equal(t, http.MethodPost, upstream.lastReq.Method)
+	require.NoError(t, upstream.lastReqContextErrDuringDo)
+	require.True(t, upstream.lastReqDeadlineOKDuringDo)
+	require.WithinDuration(t, time.Now().Add(detachedUpstreamRequestTimeout), upstream.lastReqDeadlineDuringDo, time.Second)
 	require.False(t, gjson.GetBytes(upstream.lastBody, "type").Exists())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "generate").Exists())
 	require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool())

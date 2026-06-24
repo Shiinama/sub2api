@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"go.uber.org/zap"
 )
 
 func TestOpenAIHandleStreamingAwareError_JSONEscaping(t *testing.T) {
@@ -110,6 +112,150 @@ func TestResolveOpenAIMessagesMetadataSession_PreservesExplicitPromptCacheKey(t 
 
 	require.NotEmpty(t, sessionHash)
 	require.Equal(t, "explicit-cache", promptCacheKey)
+}
+
+func TestOpenAISharedAccountSlotReleaseStillFollowsClientCancel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	parentCtx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.5","stream":true}`)).WithContext(parentCtx)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+
+	var releaseCount int32
+	h := &OpenAIGatewayHandler{}
+	streamStarted := false
+	release, acquired := h.acquireResponsesAccountSlot(
+		c,
+		nil,
+		"session-hash",
+		&service.AccountSelectionResult{
+			Account:  &service.Account{ID: 4, Name: "openai", Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth},
+			Acquired: true,
+			ReleaseFunc: func() {
+				atomic.AddInt32(&releaseCount, 1)
+			},
+		},
+		true,
+		&streamStarted,
+		zap.NewNop(),
+	)
+	require.True(t, acquired)
+	require.NotNil(t, release)
+
+	cancel()
+
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&releaseCount) == 1
+	}, 200*time.Millisecond, 5*time.Millisecond)
+
+	release()
+	require.Equal(t, int32(1), atomic.LoadInt32(&releaseCount))
+}
+
+func TestOpenAISharedUserSlotReleaseStillFollowsClientCancel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	parentCtx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.5","stream":true}`)).WithContext(parentCtx)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+
+	cache := &concurrencyCacheMock{
+		acquireUserSlotFn: func(ctx context.Context, userID int64, maxConcurrency int, requestID string) (bool, error) {
+			return true, nil
+		},
+	}
+	h := &OpenAIGatewayHandler{
+		concurrencyHelper: NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, time.Second),
+	}
+	streamStarted := false
+	release, acquired := h.acquireResponsesUserSlot(c, 7, 1, true, &streamStarted, zap.NewNop())
+	require.True(t, acquired)
+	require.NotNil(t, release)
+
+	cancel()
+
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&cache.releaseUserCalled) == 1
+	}, 200*time.Millisecond, 5*time.Millisecond)
+
+	release()
+	require.Equal(t, int32(1), atomic.LoadInt32(&cache.releaseUserCalled))
+}
+
+func TestOpenAIResponsesHTTPDetachedAccountSlotReleaseWaitsForForwardCompletionAfterClientCancel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	parentCtx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.5","stream":true}`)).WithContext(parentCtx)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+
+	var releaseCount int32
+	h := &OpenAIGatewayHandler{}
+	streamStarted := false
+	release, acquired := h.acquireResponsesHTTPDetachedAccountSlot(
+		c,
+		nil,
+		"session-hash",
+		&service.AccountSelectionResult{
+			Account:  &service.Account{ID: 4, Name: "openai", Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth},
+			Acquired: true,
+			ReleaseFunc: func() {
+				atomic.AddInt32(&releaseCount, 1)
+			},
+		},
+		true,
+		&streamStarted,
+		zap.NewNop(),
+	)
+	require.True(t, acquired)
+	require.NotNil(t, release)
+
+	cancel()
+
+	require.Never(t, func() bool {
+		return atomic.LoadInt32(&releaseCount) > 0
+	}, 50*time.Millisecond, 5*time.Millisecond)
+
+	release()
+	require.Equal(t, int32(1), atomic.LoadInt32(&releaseCount))
+}
+
+func TestOpenAIResponsesHTTPDetachedUserSlotReleaseWaitsForForwardCompletionAfterClientCancel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	parentCtx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.5","stream":true}`)).WithContext(parentCtx)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+
+	cache := &concurrencyCacheMock{
+		acquireUserSlotFn: func(ctx context.Context, userID int64, maxConcurrency int, requestID string) (bool, error) {
+			return true, nil
+		},
+	}
+	h := &OpenAIGatewayHandler{
+		concurrencyHelper: NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, time.Second),
+	}
+	streamStarted := false
+	release, acquired := h.acquireResponsesHTTPDetachedUserSlot(c, 7, 1, true, &streamStarted, zap.NewNop())
+	require.True(t, acquired)
+	require.NotNil(t, release)
+
+	cancel()
+
+	require.Never(t, func() bool {
+		return atomic.LoadInt32(&cache.releaseUserCalled) > 0
+	}, 50*time.Millisecond, 5*time.Millisecond)
+
+	release()
+	require.Equal(t, int32(1), atomic.LoadInt32(&cache.releaseUserCalled))
 }
 
 func TestOpenAIHandleStreamingAwareError_NonStreaming(t *testing.T) {

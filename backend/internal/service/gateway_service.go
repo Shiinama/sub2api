@@ -70,10 +70,11 @@ IMPORTANT: You must NEVER generate or guess URLs for the user unless you are con
  - Do not use a colon before tool calls. Your tool calls may not be shown directly in the output, so text like "Let me read the file:" followed by a read tool call should just be "Let me read the file." with a period.`
 	maxCacheControlBlocks = 4 // Anthropic API 允许的最大 cache_control 块数量
 
-	defaultUserGroupRateCacheTTL = 30 * time.Second
-	defaultModelsListCacheTTL    = 15 * time.Second
-	postUsageBillingTimeout      = 15 * time.Second
-	debugGatewayBodyEnv          = "SUB2API_DEBUG_GATEWAY_BODY"
+	defaultUserGroupRateCacheTTL   = 30 * time.Second
+	defaultModelsListCacheTTL      = 15 * time.Second
+	postUsageBillingTimeout        = 15 * time.Second
+	detachedUpstreamRequestTimeout = 15 * time.Minute
+	debugGatewayBodyEnv            = "SUB2API_DEBUG_GATEWAY_BODY"
 	// 上游错误体只需要提取错误 JSON/日志摘要，默认 512KiB 避免错误风暴叠加大请求体。
 	gatewayUpstreamErrorBodyReadLimit int64 = 512 << 10
 )
@@ -9174,6 +9175,14 @@ func detachUpstreamContext(ctx context.Context) (context.Context, context.Cancel
 		return context.Background(), func() {}
 	}
 	return context.WithoutCancel(ctx), func() {}
+}
+
+func detachBoundedUpstreamContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	base := context.Background()
+	if ctx != nil {
+		base = context.WithoutCancel(ctx)
+	}
+	return context.WithTimeout(base, detachedUpstreamRequestTimeout)
 }
 
 // billingDeps 扣费逻辑依赖的服务（由各 gateway service 提供）
