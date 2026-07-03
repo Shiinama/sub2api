@@ -37,6 +37,165 @@ func TestParsePricingData_ParsesPriorityAndServiceTierFields(t *testing.T) {
 	require.True(t, pricing.SupportsServiceTier)
 }
 
+func TestParsePricingData_DerivesGeminiLongContextFromAbove200KFields(t *testing.T) {
+	svc := &PricingService{}
+	body := []byte(`{
+		"gemini-2.5-pro": {
+			"input_cost_per_token": 0.00000125,
+			"input_cost_per_token_above_200k_tokens": 0.0000025,
+			"output_cost_per_token": 0.00001,
+			"output_cost_per_token_above_200k_tokens": 0.000015,
+			"cache_read_input_token_cost": 0.000000125,
+			"cache_read_input_token_cost_above_200k_tokens": 0.00000025,
+			"litellm_provider": "vertex_ai-language-models",
+			"mode": "chat"
+		}
+	}`)
+
+	data, err := svc.parsePricingData(body)
+	require.NoError(t, err)
+	pricing := data["gemini-2.5-pro"]
+	require.NotNil(t, pricing)
+	require.Equal(t, 200000, pricing.LongContextInputTokenThreshold)
+	require.InDelta(t, 2.0, pricing.LongContextInputCostMultiplier, 1e-12)
+	require.InDelta(t, 1.5, pricing.LongContextOutputCostMultiplier, 1e-12)
+	require.False(t, pricing.LongContextPriorityPricing)
+}
+
+func TestParsePricingData_DerivesGeminiPriorityLongContextFromAbove200KPriorityFields(t *testing.T) {
+	svc := &PricingService{}
+	body := []byte(`{
+		"gemini-3.1-pro-preview": {
+			"input_cost_per_token": 0.000002,
+			"input_cost_per_token_above_200k_tokens": 0.000004,
+			"input_cost_per_token_priority": 0.0000036,
+			"input_cost_per_token_above_200k_tokens_priority": 0.0000072,
+			"output_cost_per_token": 0.000012,
+			"output_cost_per_token_above_200k_tokens": 0.000018,
+			"output_cost_per_token_priority": 0.0000216,
+			"output_cost_per_token_above_200k_tokens_priority": 0.0000324,
+			"cache_read_input_token_cost": 0.0000002,
+			"cache_read_input_token_cost_above_200k_tokens": 0.0000004,
+			"cache_read_input_token_cost_priority": 0.00000036,
+			"cache_read_input_token_cost_above_200k_tokens_priority": 0.00000072,
+			"litellm_provider": "vertex_ai-language-models",
+			"mode": "chat"
+		}
+	}`)
+
+	data, err := svc.parsePricingData(body)
+	require.NoError(t, err)
+	pricing := data["gemini-3.1-pro-preview"]
+	require.NotNil(t, pricing)
+	require.Equal(t, 200000, pricing.LongContextInputTokenThreshold)
+	require.InDelta(t, 2.0, pricing.LongContextInputCostMultiplier, 1e-12)
+	require.InDelta(t, 1.5, pricing.LongContextOutputCostMultiplier, 1e-12)
+	require.True(t, pricing.LongContextPriorityPricing)
+	require.InDelta(t, 2.0, pricing.LongContextInputCostMultiplierPriority, 1e-12)
+	require.InDelta(t, 1.5, pricing.LongContextOutputCostMultiplierPriority, 1e-12)
+}
+
+func TestParsePricingData_DerivesOpenAILongContextFromAbove272KFields(t *testing.T) {
+	svc := &PricingService{}
+	body := []byte(`{
+		"gpt-5.4": {
+			"input_cost_per_token": 0.0000025,
+			"input_cost_per_token_above_272k_tokens": 0.000005,
+			"input_cost_per_token_priority": 0.000005,
+			"output_cost_per_token": 0.000015,
+			"output_cost_per_token_above_272k_tokens": 0.0000225,
+			"output_cost_per_token_priority": 0.00003,
+			"cache_read_input_token_cost": 0.00000025,
+			"cache_read_input_token_cost_above_272k_tokens": 0.0000005,
+			"cache_read_input_token_cost_priority": 0.0000005,
+			"litellm_provider": "openai",
+			"mode": "chat"
+		}
+	}`)
+
+	data, err := svc.parsePricingData(body)
+	require.NoError(t, err)
+	pricing := data["gpt-5.4"]
+	require.NotNil(t, pricing)
+	require.Equal(t, 272000, pricing.LongContextInputTokenThreshold)
+	require.InDelta(t, 2.0, pricing.LongContextInputCostMultiplier, 1e-12)
+	require.InDelta(t, 1.5, pricing.LongContextOutputCostMultiplier, 1e-12)
+	require.False(t, pricing.LongContextPriorityPricing)
+	require.Zero(t, pricing.LongContextInputCostMultiplierPriority)
+	require.Zero(t, pricing.LongContextOutputCostMultiplierPriority)
+}
+
+func TestParsePricingData_DoesNotDeriveOpenAILongContextForNonGPTOrCodexModels(t *testing.T) {
+	svc := &PricingService{}
+	body := []byte(`{
+		"text-embedding-3-large": {
+			"input_cost_per_token": 0.00000013,
+			"input_cost_per_token_above_272k_tokens": 0.00000026,
+			"output_cost_per_token": 0.00000013,
+			"output_cost_per_token_above_272k_tokens": 0.00000026,
+			"litellm_provider": "openai",
+			"mode": "embedding"
+		}
+	}`)
+
+	data, err := svc.parsePricingData(body)
+	require.NoError(t, err)
+	pricing := data["text-embedding-3-large"]
+	require.NotNil(t, pricing)
+	require.Zero(t, pricing.LongContextInputTokenThreshold)
+	require.Zero(t, pricing.LongContextInputCostMultiplier)
+	require.Zero(t, pricing.LongContextOutputCostMultiplier)
+}
+
+func TestParsePricingData_DoesNotDeriveClaudeAbove200KLongContext(t *testing.T) {
+	svc := &PricingService{}
+	body := []byte(`{
+		"claude-sonnet-4-5": {
+			"input_cost_per_token": 0.000003,
+			"input_cost_per_token_above_200k_tokens": 0.000006,
+			"output_cost_per_token": 0.000015,
+			"output_cost_per_token_above_200k_tokens": 0.0000225,
+			"cache_read_input_token_cost": 0.0000003,
+			"cache_read_input_token_cost_above_200k_tokens": 0.0000006,
+			"litellm_provider": "anthropic",
+			"mode": "chat"
+		}
+	}`)
+
+	data, err := svc.parsePricingData(body)
+	require.NoError(t, err)
+	pricing := data["claude-sonnet-4-5"]
+	require.NotNil(t, pricing)
+	require.Zero(t, pricing.LongContextInputTokenThreshold)
+	require.Zero(t, pricing.LongContextInputCostMultiplier)
+	require.Zero(t, pricing.LongContextOutputCostMultiplier)
+}
+
+func TestParsePricingData_ExplicitLongContextFieldsOverrideAboveFields(t *testing.T) {
+	svc := &PricingService{}
+	body := []byte(`{
+		"gemini-2.5-pro": {
+			"input_cost_per_token": 0.00000125,
+			"input_cost_per_token_above_200k_tokens": 0.0000025,
+			"output_cost_per_token": 0.00001,
+			"output_cost_per_token_above_200k_tokens": 0.000015,
+			"long_context_input_token_threshold": 123456,
+			"long_context_input_cost_multiplier": 1.25,
+			"long_context_output_cost_multiplier": 1.1,
+			"litellm_provider": "gemini",
+			"mode": "chat"
+		}
+	}`)
+
+	data, err := svc.parsePricingData(body)
+	require.NoError(t, err)
+	pricing := data["gemini-2.5-pro"]
+	require.NotNil(t, pricing)
+	require.Equal(t, 123456, pricing.LongContextInputTokenThreshold)
+	require.InDelta(t, 1.25, pricing.LongContextInputCostMultiplier, 1e-12)
+	require.InDelta(t, 1.1, pricing.LongContextOutputCostMultiplier, 1e-12)
+}
+
 func TestGetModelPricing_Gpt53CodexSparkUsesGpt51CodexPricing(t *testing.T) {
 	sparkPricing := &LiteLLMModelPricing{InputCostPerToken: 1}
 	gpt53Pricing := &LiteLLMModelPricing{InputCostPerToken: 9}

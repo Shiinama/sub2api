@@ -290,6 +290,120 @@ func TestCalculateCost_OpenAIGPT54NoLongContextKeepsCacheCreationAtBasePrice(t *
 		"cache_creation_cost should remain at base price when below long-context threshold")
 }
 
+func TestCalculateCost_GeminiLongContextBoundaryUsesWholeSessionPricing(t *testing.T) {
+	pricingSvc := &PricingService{
+		pricingData: map[string]*LiteLLMModelPricing{
+			"gemini-2.5-pro": {
+				InputCostPerToken:               1.25e-6,
+				OutputCostPerToken:              10e-6,
+				CacheCreationInputTokenCost:     1.25e-6,
+				CacheReadInputTokenCost:         0.125e-6,
+				LongContextInputTokenThreshold:  200000,
+				LongContextInputCostMultiplier:  2.0,
+				LongContextOutputCostMultiplier: 1.5,
+			},
+		},
+	}
+	svc := NewBillingService(&config.Config{}, pricingSvc)
+
+	atThreshold := UsageTokens{
+		InputTokens:     100000,
+		CacheReadTokens: 100000,
+		OutputTokens:    1000,
+	}
+	baseCost, err := svc.CalculateCost("gemini-2.5-pro", atThreshold, 1.0)
+	require.NoError(t, err)
+	require.InDelta(t, float64(atThreshold.InputTokens)*1.25e-6, baseCost.InputCost, 1e-10)
+	require.InDelta(t, float64(atThreshold.CacheReadTokens)*0.125e-6, baseCost.CacheReadCost, 1e-10)
+	require.InDelta(t, float64(atThreshold.OutputTokens)*10e-6, baseCost.OutputCost, 1e-10)
+
+	aboveThreshold := UsageTokens{
+		InputTokens:         100001,
+		CacheReadTokens:     100000,
+		CacheCreationTokens: 5000,
+		OutputTokens:        1000,
+	}
+	longCost, err := svc.CalculateCost("gemini-2.5-pro", aboveThreshold, 1.0)
+	require.NoError(t, err)
+	require.InDelta(t, float64(aboveThreshold.InputTokens)*1.25e-6*2.0, longCost.InputCost, 1e-10)
+	require.InDelta(t, float64(aboveThreshold.CacheReadTokens)*0.125e-6*2.0, longCost.CacheReadCost, 1e-10)
+	require.InDelta(t, float64(aboveThreshold.CacheCreationTokens)*1.25e-6*2.0, longCost.CacheCreationCost, 1e-10)
+	require.InDelta(t, float64(aboveThreshold.OutputTokens)*10e-6*1.5, longCost.OutputCost, 1e-10)
+}
+
+func TestCalculateCost_GPTLongContextAppliesToFlexButNotPriorityWithoutPriorityAbovePricing(t *testing.T) {
+	pricingSvc := &PricingService{
+		pricingData: map[string]*LiteLLMModelPricing{
+			"gpt-5.5": {
+				InputCostPerToken:               5e-6,
+				InputCostPerTokenPriority:       10e-6,
+				OutputCostPerToken:              30e-6,
+				OutputCostPerTokenPriority:      60e-6,
+				CacheCreationInputTokenCost:     5e-6,
+				CacheReadInputTokenCost:         0.5e-6,
+				CacheReadInputTokenCostPriority: 1e-6,
+				LongContextInputTokenThreshold:  272000,
+				LongContextInputCostMultiplier:  2.0,
+				LongContextOutputCostMultiplier: 1.5,
+			},
+		},
+	}
+	svc := NewBillingService(&config.Config{}, pricingSvc)
+	tokens := UsageTokens{
+		InputTokens:         300000,
+		CacheCreationTokens: 1000,
+		CacheReadTokens:     1000,
+		OutputTokens:        1000,
+	}
+
+	flexCost, err := svc.CalculateCostWithServiceTier("gpt-5.5", tokens, 1.0, "flex")
+	require.NoError(t, err)
+	require.InDelta(t, float64(tokens.InputTokens)*5e-6*2.0*0.5, flexCost.InputCost, 1e-10)
+	require.InDelta(t, float64(tokens.CacheCreationTokens)*5e-6*2.0*0.5, flexCost.CacheCreationCost, 1e-10)
+	require.InDelta(t, float64(tokens.CacheReadTokens)*0.5e-6*2.0*0.5, flexCost.CacheReadCost, 1e-10)
+	require.InDelta(t, float64(tokens.OutputTokens)*30e-6*1.5*0.5, flexCost.OutputCost, 1e-10)
+
+	priorityCost, err := svc.CalculateCostWithServiceTier("gpt-5.5", tokens, 1.0, "priority")
+	require.NoError(t, err)
+	require.InDelta(t, float64(tokens.InputTokens)*10e-6, priorityCost.InputCost, 1e-10)
+	require.InDelta(t, float64(tokens.CacheCreationTokens)*5e-6, priorityCost.CacheCreationCost, 1e-10)
+	require.InDelta(t, float64(tokens.CacheReadTokens)*1e-6, priorityCost.CacheReadCost, 1e-10)
+	require.InDelta(t, float64(tokens.OutputTokens)*60e-6, priorityCost.OutputCost, 1e-10)
+}
+
+func TestCalculateCost_GeminiPriorityLongContextUsesPriorityMultipliersWhenPresent(t *testing.T) {
+	pricingSvc := &PricingService{
+		pricingData: map[string]*LiteLLMModelPricing{
+			"gemini-3.1-pro-preview": {
+				InputCostPerToken:                       2e-6,
+				InputCostPerTokenPriority:               3.6e-6,
+				OutputCostPerToken:                      12e-6,
+				OutputCostPerTokenPriority:              21.6e-6,
+				CacheReadInputTokenCost:                 0.2e-6,
+				CacheReadInputTokenCostPriority:         0.36e-6,
+				LongContextInputTokenThreshold:          200000,
+				LongContextInputCostMultiplier:          2.0,
+				LongContextOutputCostMultiplier:         1.5,
+				LongContextPriorityPricing:              true,
+				LongContextInputCostMultiplierPriority:  2.0,
+				LongContextOutputCostMultiplierPriority: 1.5,
+			},
+		},
+	}
+	svc := NewBillingService(&config.Config{}, pricingSvc)
+	tokens := UsageTokens{
+		InputTokens:     210000,
+		CacheReadTokens: 1000,
+		OutputTokens:    1000,
+	}
+
+	cost, err := svc.CalculateCostWithServiceTier("gemini-3.1-pro-preview", tokens, 1.0, "priority")
+	require.NoError(t, err)
+	require.InDelta(t, float64(tokens.InputTokens)*3.6e-6*2.0, cost.InputCost, 1e-10)
+	require.InDelta(t, float64(tokens.CacheReadTokens)*0.36e-6*2.0, cost.CacheReadCost, 1e-10)
+	require.InDelta(t, float64(tokens.OutputTokens)*21.6e-6*1.5, cost.OutputCost, 1e-10)
+}
+
 // 覆盖 5m / 1h ephemeral 分类计费路径：长上下文触发时两档价格都应被倍率缩放。
 // 使用手工构造的 pricing（参考 TestCalculateCost_SupportsCacheBreakdown 的写法）
 // 以便同时控制 SupportsCacheBreakdown + 长上下文阈值。
@@ -748,6 +862,35 @@ func TestCalculateCostWithLongContext_AboveThreshold_CacheBelowThreshold(t *test
 	// 正常费用不含长上下文
 	normalCost, _ := svc.CalculateCost("claude-sonnet-4", tokens, 1.0)
 	require.True(t, cost.ActualCost > normalCost.ActualCost, "长上下文费用应高于正常费用")
+}
+
+func TestCalculateCostWithLongContext_GeminiUsesModelLevelWholeSessionPricing(t *testing.T) {
+	pricingSvc := &PricingService{
+		pricingData: map[string]*LiteLLMModelPricing{
+			"gemini-2.5-pro": {
+				InputCostPerToken:               1.25e-6,
+				OutputCostPerToken:              10e-6,
+				CacheReadInputTokenCost:         0.125e-6,
+				LongContextInputTokenThreshold:  200000,
+				LongContextInputCostMultiplier:  2.0,
+				LongContextOutputCostMultiplier: 1.5,
+			},
+		},
+	}
+	svc := NewBillingService(&config.Config{}, pricingSvc)
+	tokens := UsageTokens{
+		InputTokens:  210000,
+		OutputTokens: 1000,
+	}
+
+	cost, err := svc.CalculateCostWithLongContext("gemini-2.5-pro", tokens, 1.0, 200000, 2.0)
+	require.NoError(t, err)
+
+	expectedInput := float64(tokens.InputTokens) * 1.25e-6 * 2.0
+	expectedOutput := float64(tokens.OutputTokens) * 10e-6 * 1.5
+	require.InDelta(t, expectedInput, cost.InputCost, 1e-10)
+	require.InDelta(t, expectedOutput, cost.OutputCost, 1e-10)
+	require.InDelta(t, expectedInput+expectedOutput, cost.TotalCost, 1e-10)
 }
 
 func TestCalculateCostWithLongContext_DisabledThreshold(t *testing.T) {
