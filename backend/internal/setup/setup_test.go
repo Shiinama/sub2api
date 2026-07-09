@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDecideAdminBootstrap(t *testing.T) {
@@ -111,6 +112,22 @@ func TestApplyRedisURL(t *testing.T) {
 		!cfg.EnableTLS {
 		t.Fatalf("applyRedisURL() unexpected config: %#v", cfg)
 	}
+}
+
+func TestSetupMigrationTimeout(t *testing.T) {
+	t.Run("uses default timeout when unset", func(t *testing.T) {
+		cfg := &SetupConfig{}
+		if got := cfg.migrationTimeout(); got != 60*time.Second {
+			t.Fatalf("migrationTimeout()=%s, want 60s", got)
+		}
+	})
+
+	t.Run("uses configured timeout", func(t *testing.T) {
+		cfg := &SetupConfig{MigrationTimeoutSeconds: 300}
+		if got := cfg.migrationTimeout(); got != 300*time.Second {
+			t.Fatalf("migrationTimeout()=%s, want 300s", got)
+		}
+	})
 }
 
 func TestWriteConfigFileKeepsDefaultUserConcurrency(t *testing.T) {
