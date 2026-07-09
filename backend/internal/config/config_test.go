@@ -17,6 +17,40 @@ func resetViperWithJWTSecret(t *testing.T) {
 	t.Setenv("JWT_SECRET", strings.Repeat("x", 32))
 }
 
+func TestRootDockerfileUsesRailwayScopedCacheMountIDs(t *testing.T) {
+	t.Parallel()
+
+	dockerfilePath := filepath.Join("..", "..", "..", "Dockerfile")
+	contents, err := os.ReadFile(dockerfilePath)
+	require.NoError(t, err)
+
+	const (
+		cacheMountMarker     = "--mount=type=cache,id="
+		railwayCacheIDPrefix = "s/d9401e48-1863-444c-a0bb-a5b7bb527100-"
+	)
+
+	foundCacheMount := false
+	for _, line := range strings.Split(string(contents), "\n") {
+		markerIndex := strings.Index(line, cacheMountMarker)
+		if markerIndex == -1 {
+			continue
+		}
+
+		foundCacheMount = true
+		cacheIDAndOptions := line[markerIndex+len(cacheMountMarker):]
+		cacheID, _, _ := strings.Cut(cacheIDAndOptions, ",")
+		require.Truef(
+			t,
+			strings.HasPrefix(cacheID, railwayCacheIDPrefix),
+			"Docker cache mount ID %q must use Railway service scope %q",
+			cacheID,
+			railwayCacheIDPrefix,
+		)
+	}
+
+	require.True(t, foundCacheMount, "root Dockerfile must contain at least one cache mount")
+}
+
 func TestLoadForBootstrapAllowsMissingJWTSecret(t *testing.T) {
 	viper.Reset()
 	t.Setenv("JWT_SECRET", "")
