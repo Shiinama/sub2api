@@ -61,10 +61,10 @@ type channelModelPricingRequest struct {
 	Models           []string                 `json:"models" binding:"required,min=1,max=100"`
 	BillingMode      string                   `json:"billing_mode" binding:"omitempty,oneof=token per_request image"`
 	InputPrice       *float64                 `json:"input_price" binding:"omitempty,min=0"`
-	ImageInputPrice  *float64                 `json:"image_input_price" binding:"omitempty,min=0"`
 	OutputPrice      *float64                 `json:"output_price" binding:"omitempty,min=0"`
 	CacheWritePrice  *float64                 `json:"cache_write_price" binding:"omitempty,min=0"`
 	CacheReadPrice   *float64                 `json:"cache_read_price" binding:"omitempty,min=0"`
+	ImageInputPrice  *float64                 `json:"image_input_price" binding:"omitempty,min=0"`
 	ImageOutputPrice *float64                 `json:"image_output_price" binding:"omitempty,min=0"`
 	PerRequestPrice  *float64                 `json:"per_request_price" binding:"omitempty,min=0"`
 	Intervals        []pricingIntervalRequest `json:"intervals"`
@@ -113,10 +113,10 @@ type channelModelPricingResponse struct {
 	Models           []string                  `json:"models"`
 	BillingMode      string                    `json:"billing_mode"`
 	InputPrice       *float64                  `json:"input_price"`
-	ImageInputPrice  *float64                  `json:"image_input_price"`
 	OutputPrice      *float64                  `json:"output_price"`
 	CacheWritePrice  *float64                  `json:"cache_write_price"`
 	CacheReadPrice   *float64                  `json:"cache_read_price"`
+	ImageInputPrice  *float64                  `json:"image_input_price"`
 	ImageOutputPrice *float64                  `json:"image_output_price"`
 	PerRequestPrice  *float64                  `json:"per_request_price"`
 	Intervals        []pricingIntervalResponse `json:"intervals"`
@@ -221,10 +221,10 @@ func pricingToResponse(p *service.ChannelModelPricing) channelModelPricingRespon
 		Models:           models,
 		BillingMode:      billingMode,
 		InputPrice:       p.InputPrice,
-		ImageInputPrice:  p.ImageInputPrice,
 		OutputPrice:      p.OutputPrice,
 		CacheWritePrice:  p.CacheWritePrice,
 		CacheReadPrice:   p.CacheReadPrice,
+		ImageInputPrice:  p.ImageInputPrice,
 		ImageOutputPrice: p.ImageOutputPrice,
 		PerRequestPrice:  p.PerRequestPrice,
 		Intervals:        intervals,
@@ -273,10 +273,10 @@ func pricingRequestToService(reqs []channelModelPricingRequest) []service.Channe
 			Models:           r.Models,
 			BillingMode:      billingMode,
 			InputPrice:       r.InputPrice,
-			ImageInputPrice:  r.ImageInputPrice,
 			OutputPrice:      r.OutputPrice,
 			CacheWritePrice:  r.CacheWritePrice,
 			CacheReadPrice:   r.CacheReadPrice,
+			ImageInputPrice:  r.ImageInputPrice,
 			ImageOutputPrice: r.ImageOutputPrice,
 			PerRequestPrice:  r.PerRequestPrice,
 			Intervals:        intervals,
@@ -499,10 +499,10 @@ func (h *ChannelHandler) GetModelDefaultPricing(c *gin.Context) {
 	response.Success(c, gin.H{
 		"found":              true,
 		"input_price":        pricing.InputPricePerToken,
-		"image_input_price":  pricing.ImageInputPricePerToken,
 		"output_price":       pricing.OutputPricePerToken,
 		"cache_write_price":  pricing.CacheCreationPricePerToken,
 		"cache_read_price":   pricing.CacheReadPricePerToken,
+		"image_input_price":  pricing.ImageInputPricePerToken,
 		"image_output_price": pricing.ImageOutputPricePerToken,
 	})
 }
