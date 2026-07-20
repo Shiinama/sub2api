@@ -642,8 +642,20 @@ override this limit.
 The connection cap is coordinated through Redis using a 60-second lease that
 is refreshed every 20 seconds. A process that cannot confirm a lease for a
 full lease lifetime closes its local WebSocket rather than continuing outside
-the global cap. Use `http_bridge` for client-WebSocket/upstream-HTTP operation
-when rolling out or mitigating upstream WebSocket issues.
+the global cap.
+
+Enable the v2 mode router before selecting an account-level WS mode such as
+`http_bridge`:
+
+```yaml
+gateway:
+  openai_ws:
+    mode_router_v2_enabled: true
+```
+
+Or set `GATEWAY_OPENAI_WS_MODE_ROUTER_V2_ENABLED=true` in the environment.
+Use `http_bridge` for client-WebSocket/upstream-HTTP operation when rolling out
+or mitigating upstream WebSocket issues.
 
 #### ⚠️ Important: Creating the Admin Account
 
@@ -724,6 +736,7 @@ Sub2API supports both Grok subscription accounts through xAI OAuth and standard 
 - Text models: `grok-4.5`, `grok-4.3`, `grok-build-0.1`, `grok-composer-2.5-fast`, `grok-4.20-0309-reasoning`, `grok-4.20-0309-non-reasoning`, and `grok-4.20-multi-agent-0309`
 - Media targets for Grok groups: `/v1/images/generations`, `/images/generations`, `/v1/images/edits`, `/images/edits`, `/v1/videos/generations`, `/videos/generations`, `/v1/videos/edits`, `/videos/edits`, `/v1/videos/extensions`, `/videos/extensions`, `/v1/videos/{request_id}`, and `/videos/{request_id}`. Generation, editing, and extension requests require the group image-generation permission.
 - Media models: `grok-imagine`, `grok-imagine-image-quality`, `grok-imagine-image`, `grok-imagine-edit`, `grok-imagine-video`, and `grok-imagine-video-1.5`
+- JSON image-edit and video-generation requests accept image references in `image`, `images`, `reference_images`, and `mask` objects. Use `url` for xAI-compatible payloads; the legacy `image_url` field remains accepted and is normalized to `url` before forwarding.
 - Out of scope for this provider: TTS, transcription, browser automation, cookies, and Grok web scraping
 
 ### OAuth Configuration
@@ -789,6 +802,10 @@ The `base_url` above is the public Sub2API URL ending in `/v1`, not `api.x.ai` o
 xAI quota is passive. Sub2API does not invent subscription quota values; it records whitelisted xAI rate-limit headers from successful or rate-limited upstream responses when xAI sends them. Before the first usable upstream response, the dashboard shows quota as unknown and still displays local Sub2API usage stats.
 
 `401` responses temporarily remove accounts with invalid credentials from scheduling. `403` responses are treated as access or entitlement failures instead of token-refresh loops. `429` responses use `Retry-After` or a short cooldown to temporarily remove the account from scheduling.
+
+New Grok image and video generation requests use a media-specific eligibility check. API-key accounts remain eligible. OAuth accounts require positive paid-entitlement evidence from the xAI billing probe; Free, forbidden, missing, malformed, and inconclusive billing observations are excluded from new media generation. Unobserved OAuth accounts are probed before the first media request is forwarded, and imports run the billing-first quota probe proactively. Chat requests and video status lookups are not affected by this media-only quarantine. If no eligible account remains, the media endpoint returns HTTP `503` with error type `grok_media_no_eligible_account`.
+
+Administrators can override automatic media eligibility through the account create/update API by setting `extra.grok_media_eligible` to `false` (exclude) or `true` (force eligible). On update, set it to `null` to remove the override and return to automatic probe-based behavior; omitting the field preserves the current override. A weekly allowance period alone is not treated as a paid tier signal. Successful image responses must contain at least one actual image output; empty HTTP `200` responses trigger account failover instead of being counted and returned as successful generations.
 
 ---
 

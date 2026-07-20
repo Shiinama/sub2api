@@ -38,6 +38,21 @@ func Logger() gin.HandlerFunc {
 		accountID, hasAccountID := c.Request.Context().Value(ctxkey.AccountID).(int64)
 		platform, _ := c.Request.Context().Value(ctxkey.Platform).(string)
 		model, _ := c.Request.Context().Value(ctxkey.Model).(string)
+		reason, rejected := GetIngressRejectReason(c)
+		if rejected {
+			recordIngressReject(c, reason)
+			allowed, droppedSummary := globalIngressRejectAccessSampler.allow(endTime)
+			if droppedSummary > 0 {
+				logger.FromContext(c.Request.Context()).Info("ingress rejection access logs dropped",
+					zap.String("component", "http.access"),
+					zap.Uint64("dropped_count", droppedSummary),
+					zap.Bool(logger.OpsSystemLogSkipField, true),
+				)
+			}
+			if !allowed {
+				return
+			}
+		}
 
 		fields := []zap.Field{
 			zap.String("component", "http.access"),
@@ -49,6 +64,12 @@ func Logger() gin.HandlerFunc {
 			zap.String("path", path),
 		}
 		fields = appendAccessIngressFields(fields, c)
+		if rejected {
+			fields = append(fields,
+				zap.String("ingress_reject_reason", string(reason)),
+				zap.Bool(logger.OpsSystemLogSkipField, true),
+			)
+		}
 		if hasAccountID && accountID > 0 {
 			fields = append(fields, zap.Int64("account_id", accountID))
 		}

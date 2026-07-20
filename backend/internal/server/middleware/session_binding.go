@@ -1,33 +1,54 @@
 package middleware
 
 import (
+	"strings"
+
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
 )
 
-// SessionBindingContext 全局中间件：将请求的可信客户端 IP 与 User-Agent 注入
-// request context，供 token 签发路径（登录 / 刷新 / OAuth 回调）读取并写入会话绑定。
-// 必须使用 GetTrustedClientIP（走 trusted_proxies 链），不可信头会导致绑定被伪造绕过。
-func SessionBindingContext() gin.HandlerFunc {
+// SessionBindingContext 全局中间件：将请求的客户端 IP 与 User-Agent 注入
+// request context，供 token 签发路径（登录 / 刷新 / OAuth 回调）读取并写入会话绑定，
+// 同时作为审计日志、会话绑定校验的统一客户端 IP 来源。
+// IP 取值与 API Key IP 限制共用 Gin trusted_proxies 解析链；旧设置开关
+// 仅为配置兼容保留，不能单独使直连请求的转发头变为可信。
+func SessionBindingContext(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		userAgent := normalizePersistentText(c.Request.UserAgent(), maxPersistentUserAgentBytes)
+		c.Request.Header.Set("User-Agent", userAgent)
 		binding := &service.SessionBinding{
-			IP:        ip.GetTrustedClientIP(c),
-			UserAgent: c.Request.UserAgent(),
+			IP:        ip.GetSecurityClientIP(c, cfg.TrustForwardedIPForAPIKeyACL()),
+			UserAgent: userAgent,
 		}
 		c.Request = c.Request.WithContext(service.WithSessionBinding(c.Request.Context(), binding))
 		c.Next()
 	}
 }
 
-// currentSessionBindingHash 计算当前请求的会话指纹哈希。
-func currentSessionBindingHash(c *gin.Context) string {
-	binding := &service.SessionBinding{
-		IP:        ip.GetTrustedClientIP(c),
-		UserAgent: c.Request.UserAgent(),
+// requestSessionBinding 返回当前请求的会话指纹，优先取 SessionBindingContext
+// 注入的解析结果（保证与 token 签发路径取值一致）；注入缺失时按 trusted_proxies
+// 链回退兜底（等价于开关关闭时的行为）。
+func requestSessionBinding(c *gin.Context) *service.SessionBinding {
+	if binding := service.SessionBindingFromContext(c.Request.Context()); binding != nil {
+		return binding
 	}
-	return binding.Hash()
+	return &service.SessionBinding{
+		IP:        ip.GetTrustedClientIP(c),
+		UserAgent: normalizePersistentText(c.Request.UserAgent(), maxPersistentUserAgentBytes),
+	}
+}
+
+// SecurityClientIP 返回当前请求用于安全敏感记录（审计日志等）的客户端 IP。
+// 与会话绑定、API Key IP 限制共用同一套「信任反代传递的客户端 IP」开关语义。
+func SecurityClientIP(c *gin.Context) string {
+	if binding := service.SessionBindingFromContext(c.Request.Context()); binding != nil &&
+		strings.TrimSpace(binding.IP) != "" {
+		return binding.IP
+	}
+	return ip.GetTrustedClientIP(c)
 }
 
 // enforceSessionBinding 校验 access token 的会话指纹（IP/UA 绑定）。
@@ -49,7 +70,8 @@ func enforceSessionBinding(
 	if claims == nil || claims.BindingHash == "" {
 		return true
 	}
-	current := currentSessionBindingHash(c)
+	binding := requestSessionBinding(c)
+	current := binding.Hash()
 	if current == "" || current == claims.BindingHash {
 		return true
 	}
@@ -71,8 +93,8 @@ func enforceSessionBinding(
 			Action:      service.AuditActionSessionBindingMismatch,
 			Method:      c.Request.Method,
 			Path:        path,
-			ClientIP:    ip.GetTrustedClientIP(c),
-			UserAgent:   c.Request.UserAgent(),
+			ClientIP:    binding.IP,
+			UserAgent:   normalizePersistentText(c.Request.UserAgent(), maxPersistentUserAgentBytes),
 			StatusCode:  401,
 		})
 	}
