@@ -618,7 +618,7 @@ func TestBuildCountTokensRequest_OAuthMimic_DropsInjectedMaxTokens(t *testing.T)
 	svc := &GatewayService{cfg: &config.Config{}}
 	req, _, err := svc.buildCountTokensRequest(
 		context.Background(), c, account, normalized,
-		"oauth-tok", "oauth", "claude-sonnet-4-5", true,
+		"oauth-tok", "oauth", "claude-sonnet-4-5", claudeUpstreamForwardingMode{mimicClaudeCode: true},
 	)
 	require.NoError(t, err)
 	require.False(t, gjson.GetBytes(readUpstreamBodyForTest(t, req), "max_tokens").Exists(),
