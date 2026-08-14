@@ -639,7 +639,6 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 	if err != nil {
 		return nil, err
 	}
-
 	token, _, err := s.GetAccessToken(ctx, account)
 	if err != nil {
 		return nil, err
