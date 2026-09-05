@@ -15,6 +15,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 )
@@ -324,6 +325,12 @@ func (a *Account) IsGeminiCodeAssist() bool {
 	return oauthType == "code_assist"
 }
 
+// IsGeminiGoogleOne reports whether this account uses the legacy consumer
+// Gemini CLI / Code Assist OAuth channel.
+func (a *Account) IsGeminiGoogleOne() bool {
+	return a.Platform == PlatformGemini && a.Type == AccountTypeOAuth && a.GeminiOAuthType() == "google_one"
+}
+
 func (a *Account) CanGetUsage() bool {
 	return a.Type == AccountTypeOAuth
 }
@@ -625,6 +632,9 @@ func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]stri
 		return nil
 	}
 	if len(rawMapping) == 0 {
+		if a.IsGeminiGoogleOne() {
+			return geminicli.GoogleOneModelMapping()
+		}
 		// Antigravity 平台使用默认映射
 		if a.Platform == domain.PlatformAntigravity {
 			return domain.DefaultAntigravityModelMapping
@@ -659,6 +669,9 @@ func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]stri
 	}
 
 	// Antigravity 平台使用默认映射
+	if a.IsGeminiGoogleOne() {
+		return geminicli.GoogleOneModelMapping()
+	}
 	if a.Platform == domain.PlatformAntigravity {
 		return domain.DefaultAntigravityModelMapping
 	}
@@ -1374,8 +1387,8 @@ func (a *Account) IsCodingPlan() bool {
 
 // GetAPIProtocol 返回国产供应商账号的上游 API 协议。存储于
 // credentials["api_protocol"]；缺失或与平台不匹配时回退 chat_completions
-// （与既有行为完全一致）。responses 协议仅 deepseek 支持（官方原生 /responses
-// 端点，适配 Codex）；kimi/zhipu 无此端点。
+// （与既有行为完全一致）。responses 协议仅 deepseek / kimi 支持（官方原生
+// Responses 端点，适配 Codex）；zhipu 无此端点。
 func (a *Account) GetAPIProtocol() string {
 	if a == nil || !a.IsCNProvider() {
 		return APIProtocolChatCompletions
@@ -1386,13 +1399,42 @@ func (a *Account) GetAPIProtocol() string {
 	case APIProtocolAnthropic:
 		return APIProtocolAnthropic
 	case APIProtocolResponses:
-		if a.Platform == PlatformDeepseek {
+		if a.SupportsNativeCNResponses() {
 			return APIProtocolResponses
 		}
 	case APIProtocolChatCompletions:
 		return APIProtocolChatCompletions
 	}
 	return APIProtocolChatCompletions
+}
+
+// SupportsNativeCNResponses 报告该国产供应商是否提供原生 Responses 端点。
+// DeepSeek 官方为 /responses（无 /v1）；Kimi 按量付费与 Coding Plan 均为
+// /v1/responses（moonshot.cn / kimi.com/coding）。
+func (a *Account) SupportsNativeCNResponses() bool {
+	if a == nil {
+		return false
+	}
+	switch a.Platform {
+	case PlatformDeepseek, PlatformKimi:
+		return true
+	default:
+		return false
+	}
+}
+
+// UsesNativeCNResponses 报告当前账号是否应按原生 Responses 协议转发
+// （显式 responses，或 adaptive 且平台具备原生端点）。
+func (a *Account) UsesNativeCNResponses() bool {
+	if a == nil || !a.SupportsNativeCNResponses() {
+		return false
+	}
+	switch a.GetAPIProtocol() {
+	case APIProtocolResponses, APIProtocolAdaptive:
+		return true
+	default:
+		return false
+	}
 }
 
 // IsAdaptiveAPIProtocol 报告账号是否按入站协议动态选择供应商原生端点。

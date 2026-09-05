@@ -53,6 +53,7 @@ const backendModeDBTimeout = 5 * time.Second
 
 // cachedGatewayForwardingSettings 缓存网关转发行为设置（进程内缓存，60s TTL）
 type cachedGatewayForwardingSettings struct {
+	openAITTFTMode                   string
 	fingerprintUnification           bool
 	metadataPassthrough              bool
 	cchSigning                       bool
@@ -737,6 +738,7 @@ func (s *SettingService) IsBackendModeEnabled(ctx context.Context) bool {
 }
 
 type gatewayForwardingSettingsResult struct {
+	openAITTFTMode                                                                        string
 	fp, mp, cch, claudeOAuthSystemPromptInjection, cacheTTL1h, rewriteMessageCacheControl bool
 	claudeCodeOAuthMimicry                                                                bool
 	clientDatelineNormalization                                                           bool
@@ -747,6 +749,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 	if cached, ok := gatewayForwardingCache.Load().(*cachedGatewayForwardingSettings); ok && cached != nil {
 		if time.Now().UnixNano() < cached.expiresAt {
 			return gatewayForwardingSettingsResult{
+				openAITTFTMode:                   cached.openAITTFTMode,
 				fp:                               cached.fingerprintUnification,
 				mp:                               cached.metadataPassthrough,
 				cch:                              cached.cchSigning,
@@ -764,6 +767,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 		if cached, ok := gatewayForwardingCache.Load().(*cachedGatewayForwardingSettings); ok && cached != nil {
 			if time.Now().UnixNano() < cached.expiresAt {
 				return gatewayForwardingSettingsResult{
+					openAITTFTMode:                   cached.openAITTFTMode,
 					fp:                               cached.fingerprintUnification,
 					mp:                               cached.metadataPassthrough,
 					cch:                              cached.cchSigning,
@@ -780,6 +784,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gatewayForwardingDBTimeout)
 		defer cancel()
 		values, err := s.settingRepo.GetMultiple(dbCtx, []string{
+			SettingKeyOpenAITTFTMode,
 			SettingKeyEnableFingerprintUnification,
 			SettingKeyEnableMetadataPassthrough,
 			SettingKeyEnableCCHSigning,
@@ -794,6 +799,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 		if err != nil {
 			slog.Warn("failed to get gateway forwarding settings", "error", err)
 			gatewayForwardingCache.Store(&cachedGatewayForwardingSettings{
+				openAITTFTMode:                   OpenAITTFTModeSemantic,
 				fingerprintUnification:           true,
 				metadataPassthrough:              false,
 				cchSigning:                       false,
@@ -804,8 +810,9 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 				clientDatelineNormalization:      true,
 				expiresAt:                        time.Now().Add(gatewayForwardingErrorTTL).UnixNano(),
 			})
-			return gatewayForwardingSettingsResult{fp: true, claudeOAuthSystemPromptInjection: true, rewriteMessageCacheControl: s.defaultRewriteMessageCacheControl(), claudeCodeOAuthMimicry: true, clientDatelineNormalization: true}, nil
+			return gatewayForwardingSettingsResult{openAITTFTMode: OpenAITTFTModeSemantic, fp: true, claudeCodeOAuthMimicry: true, claudeOAuthSystemPromptInjection: true, rewriteMessageCacheControl: s.defaultRewriteMessageCacheControl(), clientDatelineNormalization: true}, nil
 		}
+		ttftMode := normalizeOpenAITTFTMode(values[SettingKeyOpenAITTFTMode])
 		fp := true
 		if v, ok := values[SettingKeyEnableFingerprintUnification]; ok && v != "" {
 			fp = v == "true"
@@ -832,6 +839,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 			clientDatelineNormalization = v == "true"
 		}
 		gatewayForwardingCache.Store(&cachedGatewayForwardingSettings{
+			openAITTFTMode:                   ttftMode,
 			fingerprintUnification:           fp,
 			metadataPassthrough:              mp,
 			cchSigning:                       cch,
@@ -845,6 +853,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 			expiresAt:                        time.Now().Add(gatewayForwardingCacheTTL).UnixNano(),
 		})
 		return gatewayForwardingSettingsResult{
+			openAITTFTMode:                   ttftMode,
 			fp:                               fp,
 			mp:                               mp,
 			cch:                              cch,
@@ -861,6 +870,11 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 		return r
 	}
 	return gatewayForwardingSettingsResult{fp: true, claudeOAuthSystemPromptInjection: true, claudeCodeOAuthMimicry: true, clientDatelineNormalization: true}
+}
+
+// GetOpenAITTFTMode 返回 Responses first_token_ms 的统计口径。
+func (s *SettingService) GetOpenAITTFTMode(ctx context.Context) string {
+	return s.getGatewayForwardingSettingsCached(ctx).openAITTFTMode
 }
 
 // GetGatewayForwardingSettings returns cached gateway forwarding settings.

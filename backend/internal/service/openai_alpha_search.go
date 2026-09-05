@@ -30,6 +30,9 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 	if s == nil || c == nil || account == nil {
 		return nil, fmt.Errorf("service, context, and account are required")
 	}
+	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
+		return nil, err
+	}
 	modelResult := gjson.GetBytes(body, "model")
 	requestedModel := strings.TrimSpace(modelResult.String())
 	if modelResult.Type != gjson.String || requestedModel == "" {
@@ -74,7 +77,7 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 	}
 
 	upstreamStart := time.Now()
-	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	resp, err := s.doOpenAIUpstream(req, proxyURL, account)
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 	if err != nil {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)
@@ -125,11 +128,12 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 		return nil, nil
 	}
 	return &OpenAIForwardResult{
-		RequestID:      strings.TrimSpace(resp.Header.Get("x-request-id")),
-		Model:          requestedModel,
-		UpstreamModel:  upstreamModel,
-		Duration:       time.Since(upstreamStart),
-		WebSearchCalls: 1,
+		RequestID:       strings.TrimSpace(resp.Header.Get("x-request-id")),
+		UpstreamHeaders: resp.Header,
+		Model:           requestedModel,
+		UpstreamModel:   upstreamModel,
+		Duration:        time.Since(upstreamStart),
+		WebSearchCalls:  1,
 	}, nil
 }
 
@@ -157,7 +161,7 @@ func (s *OpenAIGatewayService) forwardAlphaSearchViaResponsesWebSearch(
 	SetActualOpenAIUpstreamEndpoint(c, "/v1/responses")
 
 	upstreamStart := time.Now()
-	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	resp, err := s.doOpenAIUpstream(req, proxyURL, account)
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 	if err != nil {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)
@@ -209,6 +213,7 @@ func (s *OpenAIGatewayService) forwardAlphaSearchViaResponsesWebSearch(
 	c.Data(http.StatusOK, "application/json", alphaRespBody)
 	return &OpenAIForwardResult{
 		RequestID:        strings.TrimSpace(resp.Header.Get("x-request-id")),
+		UpstreamHeaders:  resp.Header,
 		Model:            requestedModel,
 		UpstreamModel:    upstreamModel,
 		UpstreamEndpoint: "/v1/responses",
@@ -272,10 +277,11 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchResponsesWebSearchRequest(c
 	}
 	apiKeyID := getAPIKeyIDFromContext(c)
 	if sessionID := strings.TrimSpace(gjson.GetBytes(alphaBody, "id").String()); sessionID != "" {
-		isolated := isolateOpenAISessionID(apiKeyID, sessionID)
+		isolated := isolateOpenAIUpstreamSessionID(apiKeyID, codexAccountIdentitySource(c, account), sessionID)
 		req.Header.Set("Session_ID", isolated)
 		req.Header.Set("Conversation_ID", isolated)
 	}
+	applyCodexAccountIdentityHeaders(req.Header, codexAccountIdentitySource(c, account), apiKeyID)
 	enforceCodexIdentityHeadersWithUA(req.Header, s.codexIdentityOverrideUA(account))
 	account.ApplyHeaderOverrides(req.Header)
 	return req, nil
@@ -393,6 +399,7 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 		if turnMetadata := openAIAlphaSearchInboundHeader(c, "X-Codex-Turn-Metadata"); turnMetadata != "" {
 			req.Header.Set("X-Codex-Turn-Metadata", turnMetadata)
 		}
+		applyCodexAccountIdentityHeaders(req.Header, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 		canonical := resolveCodexOutboundIdentity("")
 		if version := openAIAlphaSearchInboundHeader(c, "Version"); version != "" {
 			req.Header.Set("Version", version)
