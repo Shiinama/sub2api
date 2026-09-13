@@ -1,10 +1,36 @@
 package service
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestMergedRecordUsageSeparatesImageCacheFromImageInput(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	svc := newOpenAIRecordUsageServiceForTest(usageRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+	svc.billingService = NewBillingService(svc.cfg, &PricingService{pricingData: map[string]*LiteLLMModelPricing{
+		"gpt-custom": {
+			InputCostPerToken: 5e-6, OutputCostPerToken: 30e-6,
+			InputCostPerImageToken: 8e-6, CacheReadInputTokenCost: 1.25e-6,
+			CacheReadInputImageTokenCost: 2e-6,
+		},
+	}})
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID: "merged-image-cache", Model: "gpt-custom",
+			Usage: OpenAIUsage{InputTokens: 100, ImageInputTokens: 80, CacheReadInputTokens: 50, ImageCacheReadTokens: 40},
+		},
+		APIKey: &APIKey{ID: 1001}, User: &User{ID: 2001}, Account: &Account{ID: 3001},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	require.InDelta(t, 10*5e-6, usageRepo.lastLog.InputCost, 1e-12)
+	require.InDelta(t, 40*8e-6, usageRepo.lastLog.ImageInputCost, 1e-12)
+	require.InDelta(t, 10*1.25e-6+40*2e-6, usageRepo.lastLog.CacheReadCost, 1e-12)
+	require.InDelta(t, 10*5e-6+40*8e-6+10*1.25e-6+40*2e-6, usageRepo.lastLog.TotalCost, 1e-12)
+}
 
 func TestPriorityLongContextTierUsesSelectedThresholdAndExplicitOverrides(t *testing.T) {
 	for _, tc := range []struct {
