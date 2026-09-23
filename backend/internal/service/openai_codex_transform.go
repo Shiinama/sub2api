@@ -155,6 +155,7 @@ var openAIChatGPTInternalUnsupportedFields = []string{
 var openAICodexOAuthUnsupportedFields = append([]string{
 	"max_output_tokens",
 	"max_completion_tokens",
+	"max_tokens",
 	"temperature",
 	"top_p",
 	"frequency_penalty",

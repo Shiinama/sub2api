@@ -1878,6 +1878,7 @@ func TestApplyCodexOAuthTransform_StripsUnsupportedResponsesTokenLimit(t *testin
 		"model":                 "gpt-5.4",
 		"max_output_tokens":     20,
 		"max_completion_tokens": 5,
+		"max_tokens":            10,
 		"input": []any{
 			map[string]any{"role": "user", "content": "hi"},
 		},
@@ -1887,6 +1888,7 @@ func TestApplyCodexOAuthTransform_StripsUnsupportedResponsesTokenLimit(t *testin
 
 	require.NotContains(t, reqBody, "max_output_tokens")
 	require.NotContains(t, reqBody, "max_completion_tokens")
+	require.NotContains(t, reqBody, "max_tokens")
 }
 
 func TestApplyCodexOAuthTransform_NormalizesPromptAndCommands(t *testing.T) {

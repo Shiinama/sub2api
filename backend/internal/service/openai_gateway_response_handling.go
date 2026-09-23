@@ -25,6 +25,48 @@ import (
 	"go.uber.org/zap"
 )
 
+const openAIResponsesLocalOutputTokenLimitContextKey = "openai_responses_local_output_token_limit"
+
+func setOpenAIResponsesLocalOutputTokenLimit(c *gin.Context, limit *int) {
+	if c == nil {
+		return
+	}
+	c.Set(openAIResponsesLocalOutputTokenLimitContextKey, limit)
+}
+
+func openAIResponsesLocalOutputTokenLimitFromContext(c *gin.Context) *int {
+	if c == nil {
+		return nil
+	}
+	value, exists := c.Get(openAIResponsesLocalOutputTokenLimitContextKey)
+	if !exists {
+		return nil
+	}
+	limit, _ := value.(*int)
+	if limit == nil || *limit <= 0 {
+		return nil
+	}
+	return limit
+}
+
+func openAIResponsesRequestedOutputTokenLimit(body []byte) *int {
+	if len(body) == 0 {
+		return nil
+	}
+	// The Responses-native field is authoritative. Legacy Chat aliases are
+	// accepted only when the native field is absent; max_completion_tokens has
+	// precedence over max_tokens, matching Chat Completions conversion.
+	for _, field := range []string{"max_output_tokens", "max_completion_tokens", "max_tokens"} {
+		value := gjson.GetBytes(body, field)
+		if !value.Exists() || value.Int() <= 0 {
+			continue
+		}
+		limit := int(value.Int())
+		return &limit
+	}
+	return nil
+}
+
 // openaiStreamingResult streaming response result
 type openaiStreamingResult struct {
 	usage            *OpenAIUsage
@@ -1636,6 +1678,11 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 	}
 	usage := &usageValue
 	logOpenAISuccessMissingUsage(ctx, c, account, resp, usage, "json", false)
+	// Preserve billing/analytics counters from the unmodified upstream body.
+	// Client-facing local token enforcement may remove non-text output items.
+	imageCount := countOpenAIResponseImageOutputsFromJSONBytes(body)
+	imageOutputSizes := collectOpenAIResponseImageOutputSizesFromJSONBytes(body)
+	searchCount := countGrokNativeSearchCallsFromJSONBytes(body)
 
 	// Replace model in response if needed
 	if originalModel != mappedModel {
@@ -1654,6 +1701,14 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 		return nil, fmt.Errorf("restore OpenAI namespace response: %w", err)
 	}
 	body = restoreCodexToolNamesFromContext(c, body)
+	if limit := openAIResponsesLocalOutputTokenLimitFromContext(c); limit != nil {
+		if limitedBody, changed, limitErr := applyOpenAIResponsesLocalOutputTokenLimit(body, originalModel, *limit); limitErr != nil {
+			logger.L().Warn("openai responses: failed to enforce local output token limit",
+				zap.Error(limitErr), zap.String("model", originalModel), zap.Int("limit", *limit))
+		} else if changed {
+			body = limitedBody
+		}
+	}
 	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	// Codex 协议要求 /responses/compact JSON 响应携带 x-codex-turn-state
 	// （codex-api/src/endpoint/compact.rs 从响应头捕获），显式回传。
@@ -1674,9 +1729,9 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 		OpenAIUsage:      usage,
 		usage:            usage,
 		responseID:       extractOpenAIResponseIDFromJSONBytes(body),
-		imageCount:       countOpenAIResponseImageOutputsFromJSONBytes(body),
-		imageOutputSizes: collectOpenAIResponseImageOutputSizesFromJSONBytes(body),
-		searchCount:      countGrokNativeSearchCallsFromJSONBytes(body),
+		imageCount:       imageCount,
+		imageOutputSizes: imageOutputSizes,
+		searchCount:      searchCount,
 	}, nil
 }
 
@@ -1755,6 +1810,14 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		}
 		restoredBody = restoreCodexToolNamesFromContext(c, restoredBody)
 		body = restoredBody
+		if limit := openAIResponsesLocalOutputTokenLimitFromContext(c); limit != nil {
+			if limitedBody, changed, limitErr := applyOpenAIResponsesLocalOutputTokenLimit(body, originalModel, *limit); limitErr != nil {
+				logger.L().Warn("openai responses SSE bridge: failed to enforce local output token limit",
+					zap.Error(limitErr), zap.String("model", originalModel), zap.Int("limit", *limit))
+			} else if changed {
+				body = limitedBody
+			}
+		}
 	} else {
 		if originalModel != mappedModel {
 			bodyText = s.replaceModelInSSEBody(bodyText, mappedModel, originalModel)
@@ -1785,6 +1848,154 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		imageOutputSizes: collectOpenAIImageOutputSizesFromSSEBody(bodyText),
 		searchCount:      countGrokNativeSearchCallsFromSSEBody(bodyText),
 	}, nil
+}
+
+func applyOpenAIResponsesLocalOutputTokenLimit(body []byte, model string, limit int) ([]byte, bool, error) {
+	if len(body) == 0 || limit <= 0 {
+		return body, false, nil
+	}
+	var response map[string]any
+	if err := decodeOpenAIJSONUseNumber(body, &response); err != nil {
+		return body, false, err
+	}
+	output, _ := response["output"].([]any)
+	usage, _ := response["usage"].(map[string]any)
+	upstreamOutputTokens := openAIJSONInt(usage["output_tokens"])
+	if upstreamOutputTokens == 0 {
+		upstreamOutputTokens = openAIJSONInt(usage["completion_tokens"])
+	}
+	outputDetails, _ := usage["output_tokens_details"].(map[string]any)
+	reasoningTokens := openAIJSONInt(outputDetails["reasoning_tokens"])
+	overLimit := upstreamOutputTokens > limit
+
+	codec, err := openAIInputTokensCodecForModel(model)
+	if err != nil {
+		return body, false, err
+	}
+	reasoningBudget := min(reasoningTokens, limit)
+	if reasoningTokens == 0 {
+		for _, rawItem := range output {
+			item, _ := rawItem.(map[string]any)
+			if firstNonEmptyString(item["type"]) != "reasoning" {
+				continue
+			}
+			for _, rawSummary := range anySlice(item["summary"]) {
+				summary, _ := rawSummary.(map[string]any)
+				count, countErr := codec.Count(firstNonEmptyString(summary["text"]))
+				if countErr != nil {
+					return body, false, countErr
+				}
+				reasoningBudget = min(reasoningBudget+count, limit)
+			}
+		}
+	}
+	reasoningRemaining := reasoningBudget
+	visibleRemaining := max(limit-reasoningBudget, 0)
+	for _, rawItem := range output {
+		item, _ := rawItem.(map[string]any)
+		switch firstNonEmptyString(item["type"]) {
+		case "reasoning":
+			for _, rawSummary := range anySlice(item["summary"]) {
+				summary, _ := rawSummary.(map[string]any)
+				text := firstNonEmptyString(summary["text"])
+				truncated, kept, didTruncate, truncateErr := truncateOpenAIOutputTextToTokens(text, model, reasoningRemaining)
+				if truncateErr != nil {
+					return body, false, truncateErr
+				}
+				if didTruncate {
+					summary["text"] = truncated
+					overLimit = true
+				}
+				reasoningRemaining = max(reasoningRemaining-kept, 0)
+			}
+		case "message":
+			for _, rawPart := range anySlice(item["content"]) {
+				part, _ := rawPart.(map[string]any)
+				if firstNonEmptyString(part["type"]) != "output_text" {
+					continue
+				}
+				text := firstNonEmptyString(part["text"])
+				truncated, kept, didTruncate, truncateErr := truncateOpenAIOutputTextToTokens(text, model, visibleRemaining)
+				if truncateErr != nil {
+					return body, false, truncateErr
+				}
+				if didTruncate {
+					part["text"] = truncated
+					overLimit = true
+				}
+				visibleRemaining = max(visibleRemaining-kept, 0)
+			}
+		}
+	}
+	if !overLimit {
+		return body, false, nil
+	}
+	filtered := output[:0]
+	for _, rawItem := range output {
+		item, _ := rawItem.(map[string]any)
+		switch firstNonEmptyString(item["type"]) {
+		case "reasoning":
+			// encrypted_content cannot be safely truncated and may represent hidden
+			// reasoning beyond the client budget. Keep only the budgeted summary.
+			delete(item, "encrypted_content")
+			filtered = append(filtered, rawItem)
+		case "message":
+			item["status"] = "incomplete"
+			content := anySlice(item["content"])
+			budgetedContent := content[:0]
+			for _, rawPart := range content {
+				part, _ := rawPart.(map[string]any)
+				if firstNonEmptyString(part["type"]) == "output_text" {
+					budgetedContent = append(budgetedContent, rawPart)
+				}
+			}
+			item["content"] = budgetedContent
+			filtered = append(filtered, rawItem)
+		}
+	}
+	response["output"] = filtered
+	response["status"] = "incomplete"
+	response["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
+	if usage != nil {
+		clientOutputTokens := min(upstreamOutputTokens, limit)
+		if upstreamOutputTokens <= 0 {
+			clientOutputTokens = limit
+		}
+		usage["output_tokens"] = clientOutputTokens
+		inputTokens := openAIJSONInt(usage["input_tokens"])
+		if inputTokens == 0 {
+			inputTokens = openAIJSONInt(usage["prompt_tokens"])
+		}
+		usage["total_tokens"] = inputTokens + clientOutputTokens
+		if outputDetails != nil && reasoningTokens > 0 {
+			outputDetails["reasoning_tokens"] = min(reasoningTokens, clientOutputTokens)
+		}
+	}
+	limited, err := json.Marshal(response)
+	if err != nil {
+		return body, false, err
+	}
+	return limited, true, nil
+}
+
+func openAIJSONInt(value any) int {
+	switch typed := value.(type) {
+	case json.Number:
+		parsed, _ := strconv.Atoi(typed.String())
+		return parsed
+	case float64:
+		return int(typed)
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	}
+	return 0
+}
+
+func anySlice(value any) []any {
+	items, _ := value.([]any)
+	return items
 }
 
 func extractOpenAISSETerminalEvent(body string) (string, []byte, bool) {
