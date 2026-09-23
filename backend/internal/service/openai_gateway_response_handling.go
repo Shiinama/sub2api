@@ -95,12 +95,18 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
 	}
+	localOutputTokenLimit := openAIResponsesLocalOutputTokenLimitFromContext(c)
 	firstOutputTimeout := time.Duration(0)
 	if account != nil && account.Platform == PlatformOpenAI {
 		firstOutputTimeout = s.openAIFirstOutputTimeout(reasoningEffort)
 	}
+	if localOutputTokenLimit != nil {
+		// Local enforcement buffers semantic output until the terminal response is
+		// available, so an upstream first-output timeout is not a useful signal.
+		firstOutputTimeout = 0
+	}
 	guardFirstOutput := firstOutputTimeout > 0
-	stageFirstOutput := account != nil && account.Platform == PlatformOpenAI
+	stageFirstOutput := account != nil && account.Platform == PlatformOpenAI && localOutputTokenLimit == nil
 	var attemptResponseHeaders http.Header
 	if stageFirstOutput {
 		if s.responseHeaderFilter != nil {
@@ -381,6 +387,13 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 
 	needModelReplace := originalModel != mappedModel
 	streamOutputAccumulator := apicompat.NewBufferedResponseAccumulator()
+	var localStreamAccumulator *openAIResponsesLocalStreamAccumulator
+	if localOutputTokenLimit != nil {
+		localStreamAccumulator = &openAIResponsesLocalStreamAccumulator{
+			model: originalModel,
+			limit: *localOutputTokenLimit,
+		}
+	}
 	streamDoneItems := newResponsesStreamOutputItems()
 	streamImageOutputs := make([]json.RawMessage, 0, 1)
 	streamSeenImages := make(map[string]struct{})
@@ -519,10 +532,16 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			pendingSSEEventType = eventType
 			eventType = strings.TrimSpace(eventType)
 			suppressCurrentEvent = codexFailureTerminal && (eventType == "error" || (sawBareError && !sawResponseFailed && eventType != "response.failed"))
+			if localOutputTokenLimit != nil && eventType != "error" && eventType != "response.failed" {
+				// The terminal data payload is self-describing. Suppress upstream event
+				// headers and all semantic deltas until that payload is available.
+				suppressCurrentEvent = true
+			}
 		}
 		// Extract data from SSE line (supports both "data: " and "data:" formats)
 		if data, ok := extractOpenAISSEDataLine(line); ok {
 			dataBytes := []byte(data)
+			usageDataBytes := dataBytes
 			eventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
 			if codexFailureTerminal && sawBareError && !sawResponseFailed &&
 				(eventType == "response.completed" || eventType == "response.done") {
@@ -541,10 +560,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			}
 			observer.ObserveOpenAI(dataBytes, eventType)
 			// 初始上游 data 的 type 只解析一次：原始值保持终止事件的精确匹配，规范化值供后续分支复用。
-			if openAIStreamEventIsTerminalWithType(data, eventType) {
+			isActualTerminal := openAIStreamEventTypeIsTerminal(eventType)
+			if (localOutputTokenLimit != nil && isActualTerminal) ||
+				(localOutputTokenLimit == nil && openAIStreamEventIsTerminalWithType(data, eventType)) {
 				sawTerminalEvent = true
 				terminalEventType = eventType
-				if strings.TrimSpace(data) == "[DONE]" {
+				if localOutputTokenLimit == nil && strings.TrimSpace(data) == "[DONE]" {
 					terminalEventType = "[DONE]"
 				}
 			}
@@ -663,14 +684,28 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				line = "data: " + data
 				eventType = effectiveOpenAISSEEventType(dataBytes, eventType)
 			}
-			if imageOutput, ok := extractImageGenerationOutputFromSSEData(dataBytes, streamSeenImages); ok {
-				streamImageOutputs = append(streamImageOutputs, imageOutput)
+			if localStreamAccumulator == nil {
+				if imageOutput, ok := extractImageGenerationOutputFromSSEData(dataBytes, streamSeenImages); ok {
+					streamImageOutputs = append(streamImageOutputs, imageOutput)
+				}
+				streamDoneItems.Observe(dataBytes)
+			} else if accumulateErr := localStreamAccumulator.Observe(eventType, dataBytes); accumulateErr != nil {
+				streamEarlyErr = fmt.Errorf("accumulate bounded local Responses stream: %w", accumulateErr)
+				return
 			}
-			streamDoneItems.Observe(dataBytes)
-			if responsesStreamEventMayContributeToOutput(eventType) {
+			if localStreamAccumulator == nil && responsesStreamEventMayContributeToOutput(eventType) {
 				var streamEvent apicompat.ResponsesStreamEvent
 				if err := json.Unmarshal(dataBytes, &streamEvent); err == nil {
 					streamOutputAccumulator.ProcessEvent(&streamEvent)
+				}
+			}
+			if localStreamAccumulator != nil && isActualTerminal {
+				boundedAccumulator := localStreamAccumulator.BufferedResponseAccumulator()
+				if normalizedData, normalized := normalizeResponsesStreamingTerminalOutput(dataBytes, boundedAccumulator, newResponsesStreamOutputItems(), nil); normalized {
+					dataBytes = normalizedData
+					data = string(normalizedData)
+					line = "data: " + data
+					eventType = effectiveOpenAISSEEventType(dataBytes, eventType)
 				}
 			}
 			if normalizedData, normalized := normalizeResponsesStreamingTerminalOutput(dataBytes, streamOutputAccumulator, streamDoneItems, streamImageOutputs); normalized {
@@ -678,6 +713,29 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				data = string(normalizedData)
 				line = "data: " + data
 				eventType = effectiveOpenAISSEEventType(dataBytes, eventType)
+			}
+			if localOutputTokenLimit != nil {
+				switch eventType {
+				case "response.completed", "response.done", "response.incomplete":
+					limitedData, changed, limitErr := applyOpenAIResponsesStreamingLocalOutputTokenLimit(dataBytes, originalModel, *localOutputTokenLimit)
+					if limitErr != nil {
+						streamEarlyErr = fmt.Errorf("enforce local streaming output token limit: %w", limitErr)
+						return
+					}
+					if changed {
+						dataBytes = limitedData
+						data = string(limitedData)
+						line = "data: " + data
+						eventType = effectiveOpenAISSEEventType(dataBytes, eventType)
+					}
+					suppressCurrentEvent = false
+				case "error", "response.failed":
+					// Preserve the existing upstream error handling path.
+				case "[DONE]":
+					suppressCurrentEvent = false
+				default:
+					suppressCurrentEvent = true
+				}
 			}
 			restoredData, restoreErr := restoreGrokResponsesClientToolPayload(c, dataBytes)
 			if restoreErr != nil {
@@ -759,7 +817,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				firstTokenMs = &ms
 				stopFirstOutputTimer()
 			}
-			s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
+			s.parseSSEUsageBytesWithType(usageDataBytes, eventType, usage)
 			return
 		}
 
@@ -1978,6 +2036,100 @@ func applyOpenAIResponsesLocalOutputTokenLimit(body []byte, model string, limit 
 	return limited, true, nil
 }
 
+func applyOpenAIResponsesStreamingLocalOutputTokenLimit(data []byte, model string, limit int) ([]byte, bool, error) {
+	if len(data) == 0 || limit <= 0 {
+		return data, false, nil
+	}
+	var event map[string]any
+	if err := decodeOpenAIJSONUseNumber(data, &event); err != nil {
+		return data, false, err
+	}
+	response, ok := event["response"].(map[string]any)
+	if !ok || response == nil {
+		return data, false, nil
+	}
+	responseBody, err := json.Marshal(response)
+	if err != nil {
+		return data, false, err
+	}
+	limitedResponse, changed, err := applyOpenAIResponsesLocalOutputTokenLimit(responseBody, model, limit)
+	if err != nil || !changed {
+		return data, false, err
+	}
+	var limited map[string]any
+	if err := decodeOpenAIJSONUseNumber(limitedResponse, &limited); err != nil {
+		return data, false, err
+	}
+	event["type"] = "response.incomplete"
+	event["response"] = limited
+	limitedEvent, err := json.Marshal(event)
+	if err != nil {
+		return data, false, err
+	}
+	return limitedEvent, true, nil
+}
+
+type openAIResponsesLocalStreamAccumulator struct {
+	model          string
+	limit          int
+	reasoning      strings.Builder
+	text           strings.Builder
+	reasoningCount int
+	textCount      int
+}
+
+func (a *openAIResponsesLocalStreamAccumulator) Observe(eventType string, data []byte) error {
+	if a == nil || a.limit <= 0 || len(data) == 0 {
+		return nil
+	}
+	eventType = strings.TrimSpace(eventType)
+	var target *strings.Builder
+	var current *int
+	switch eventType {
+	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		target, current = &a.reasoning, &a.reasoningCount
+	case "response.output_text.delta":
+		target, current = &a.text, &a.textCount
+	default:
+		return nil
+	}
+	delta := gjson.GetBytes(data, "delta").String()
+	if delta == "" {
+		return nil
+	}
+	otherCount := a.textCount
+	if target == &a.text {
+		otherCount = a.reasoningCount
+	}
+	budget := a.limit - otherCount
+	if budget <= 0 {
+		return nil
+	}
+	candidate := target.String() + delta
+	prefix, kept, _, err := truncateOpenAIOutputTextToTokens(candidate, a.model, budget)
+	if err != nil {
+		return err
+	}
+	target.Reset()
+	_, _ = target.WriteString(prefix)
+	*current = kept
+	return nil
+}
+
+func (a *openAIResponsesLocalStreamAccumulator) BufferedResponseAccumulator() *apicompat.BufferedResponseAccumulator {
+	acc := apicompat.NewBufferedResponseAccumulator()
+	if a == nil {
+		return acc
+	}
+	if a.reasoning.Len() > 0 {
+		acc.ProcessEvent(&apicompat.ResponsesStreamEvent{Type: "response.reasoning_summary_text.delta", Delta: a.reasoning.String()})
+	}
+	if a.text.Len() > 0 {
+		acc.ProcessEvent(&apicompat.ResponsesStreamEvent{Type: "response.output_text.delta", Delta: a.text.String()})
+	}
+	return acc
+}
+
 func openAIJSONInt(value any) int {
 	switch typed := value.(type) {
 	case json.Number:
@@ -2347,7 +2499,9 @@ func responsesStreamEventMayContributeToOutput(eventType string) bool {
 	case "response.output_text.delta",
 		"response.output_item.added",
 		"response.function_call_arguments.delta",
-		"response.reasoning_summary_text.delta":
+		"response.custom_tool_call_input.delta",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_text.delta":
 		return true
 	default:
 		return false

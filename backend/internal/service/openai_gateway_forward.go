@@ -294,7 +294,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			startTime,
 		)
 	}
-	if account.UsesOpenAICodexProtocol() && !reqStream && !compactPath {
+	if account.UsesOpenAICodexProtocol() && !compactPath {
 		setOpenAIResponsesLocalOutputTokenLimit(c, requestedOutputTokenLimit)
 	}
 

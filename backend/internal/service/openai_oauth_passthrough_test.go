@@ -959,6 +959,118 @@ func TestOpenAIGatewayService_NativeOAuth_EnforcesLegacyResponsesMaxTokensLocall
 	require.Equal(t, int64(5), gjson.Get(rec.Body.String(), "usage.output_tokens").Int())
 }
 
+func TestOpenAIGatewayService_NativeOAuth_EnforcesStreamingResponsesTokenLimitLocally(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gpt-5.6-terra","stream":true,"max_output_tokens":5,"input":"What is the capital of France? Please answer in detail."}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamSSE := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_stream_limit","object":"response","model":"gpt-5.6-terra","status":"in_progress","output":[]}}`,
+		"",
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","response_id":"resp_stream_limit","output_index":0,"content_index":0,"delta":"Paris is the capital of France and a major center of government, culture, finance, education, transportation, art, history, and international diplomacy."}`,
+		"",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_stream_limit","object":"response","model":"gpt-5.6-terra","status":"completed","output":[],"usage":{"input_tokens":28,"output_tokens":64,"total_tokens":92}}}`,
+		"",
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_native_stream_limit"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamSSE)),
+	}}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	account := &Account{
+		ID: 127, Name: "native", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
+		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
+		Status:      StatusActive, Schedulable: true, RateMultiplier: f64p(1),
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, body)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, gjson.GetBytes(upstream.lastBody, "max_output_tokens").Exists())
+	require.Equal(t, 64, result.Usage.OutputTokens, "billing must retain real upstream usage")
+	downstream := rec.Body.String()
+	require.NotContains(t, downstream, "response.output_text.delta")
+	require.Contains(t, downstream, `"type":"response.incomplete"`)
+	require.Contains(t, downstream, `"reason":"max_output_tokens"`)
+	terminalType, terminalPayload, ok := extractOpenAISSETerminalEvent(downstream)
+	require.True(t, ok)
+	require.Equal(t, "response.incomplete", terminalType)
+	require.Equal(t, int64(5), gjson.GetBytes(terminalPayload, "response.usage.output_tokens").Int())
+	visible := gjson.GetBytes(terminalPayload, "response.output.0.content.0.text").String()
+	codec, codecErr := openAIInputTokensCodecForModel("gpt-5.6-terra")
+	require.NoError(t, codecErr)
+	count, countErr := codec.Count(visible)
+	require.NoError(t, countErr)
+	require.LessOrEqual(t, count, 5)
+}
+
+func TestOpenAIResponsesLocalStreamAccumulator_IsTokenBounded(t *testing.T) {
+	acc := &openAIResponsesLocalStreamAccumulator{model: "gpt-5.6-terra", limit: 5}
+	first := []byte(`{"type":"response.reasoning_text.delta","delta":"consider several possible answers and compare them carefully"}`)
+	second := []byte(`{"type":"response.output_text.delta","delta":"Paris is the capital of France and a major cultural center."}`)
+
+	require.NoError(t, acc.Observe("response.reasoning_text.delta", first))
+	require.NoError(t, acc.Observe("response.output_text.delta", second))
+
+	output := acc.BufferedResponseAccumulator().BuildOutput()
+	var combined string
+	for _, item := range output {
+		for _, summary := range item.Summary {
+			combined += summary.Text
+		}
+		for _, part := range item.Content {
+			combined += part.Text
+		}
+	}
+	codec, err := openAIInputTokensCodecForModel("gpt-5.6-terra")
+	require.NoError(t, err)
+	count, err := codec.Count(combined)
+	require.NoError(t, err)
+	require.LessOrEqual(t, count, 5)
+	require.LessOrEqual(t, acc.reasoningCount+acc.textCount, 5)
+}
+
+func TestOpenAIGatewayService_NativeOAuth_LocalLimitRequiresRealTerminalEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gpt-5.6-terra","stream":true,"max_output_tokens":5,"input":"hello"}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			`data: {"type":"response.output_text.delta","delta":"partial output that has no terminal event"}`,
+			"",
+			"data: [DONE]",
+			"",
+		}, "\n"))),
+	}}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	account := &Account{
+		ID: 128, Name: "native", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
+		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
+		Status:      StatusActive, Schedulable: true, RateMultiplier: f64p(1),
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, body)
+
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Empty(t, rec.Body.String())
+}
+
 func TestOpenAIGatewayService_OAuthPassthrough_NamespaceNonStreamingResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()

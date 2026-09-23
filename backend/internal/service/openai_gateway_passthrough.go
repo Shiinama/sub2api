@@ -1230,7 +1230,7 @@ func openAIStreamDataStartsVisibleOutput(data, eventType string) bool {
 		return part.Get("text").String() != "" || part.Get("transcript").String() != ""
 	case "response.output_item.added", "response.output_item.done":
 		return openAIStreamItemHasVisibleOutput(gjson.Get(trimmed, "item"))
-	case "response.completed", "response.done":
+	case "response.completed", "response.done", "response.incomplete":
 		for _, item := range gjson.Get(trimmed, "response.output").Array() {
 			if openAIStreamItemHasVisibleOutput(item) {
 				return true
