@@ -1873,7 +1873,7 @@ func TestApplyCodexOAuthTransform_StripsChatGPTInternalUnsupportedFields(t *test
 	}
 }
 
-func TestApplyCodexOAuthTransform_PreservesResponsesTokenLimit(t *testing.T) {
+func TestApplyCodexOAuthTransform_StripsUnsupportedResponsesTokenLimit(t *testing.T) {
 	reqBody := map[string]any{
 		"model":                 "gpt-5.4",
 		"max_output_tokens":     20,
@@ -1885,7 +1885,7 @@ func TestApplyCodexOAuthTransform_PreservesResponsesTokenLimit(t *testing.T) {
 
 	applyCodexOAuthTransform(reqBody, true, false)
 
-	require.Equal(t, 20, reqBody["max_output_tokens"])
+	require.NotContains(t, reqBody, "max_output_tokens")
 	require.NotContains(t, reqBody, "max_completion_tokens")
 }
 
