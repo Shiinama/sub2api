@@ -462,11 +462,14 @@ func TestForwardAsChatCompletions_OAuthEnforcesBufferedTokenLimitsLocally(t *tes
 	const longAnswer = "Paris is the capital of France and a major center of government, culture, finance, education, transportation, art, history, and international diplomacy."
 	tests := []struct {
 		name  string
+		model string
 		field string
 		limit int64
 	}{
-		{name: "max_tokens", field: "max_tokens", limit: 20},
-		{name: "max_completion_tokens", field: "max_completion_tokens", limit: 5},
+		{name: "terra max_tokens", model: "gpt-5.6-terra", field: "max_tokens", limit: 20},
+		{name: "terra max_completion_tokens", model: "gpt-5.6-terra", field: "max_completion_tokens", limit: 5},
+		{name: "luna max_tokens", model: "gpt-5.6-luna", field: "max_tokens", limit: 20},
+		{name: "luna max_completion_tokens", model: "gpt-5.6-luna", field: "max_completion_tokens", limit: 5},
 	}
 
 	for _, tt := range tests {
@@ -474,11 +477,11 @@ func TestForwardAsChatCompletions_OAuthEnforcesBufferedTokenLimitsLocally(t *tes
 			gin.SetMode(gin.TestMode)
 			rec := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(rec)
-			body := []byte(fmt.Sprintf(`{"model":"gpt-5.6-terra","messages":[{"role":"user","content":"What is the capital of France? Please answer in detail."}],"stream":false,%q:%d}`, tt.field, tt.limit))
+			body := []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"What is the capital of France? Please answer in detail."}],"stream":false,%q:%d}`, tt.model, tt.field, tt.limit))
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 			c.Request.Header.Set("Content-Type", "application/json")
 
-			upstreamPayload := fmt.Sprintf(`data: {"type":"response.completed","response":{"id":"resp_limit","object":"response","model":"gpt-5.6-terra","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":%q}]}],"usage":{"input_tokens":28,"output_tokens":64,"total_tokens":92}}}`+"\n\n", longAnswer)
+			upstreamPayload := fmt.Sprintf(`data: {"type":"response.completed","response":{"id":"resp_limit","object":"response","model":%q,"status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":%q}]}],"usage":{"input_tokens":28,"output_tokens":64,"total_tokens":92}}}`+"\n\n", tt.model, longAnswer)
 			upstream := &httpUpstreamRecorder{resp: &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_local_limit"}},
@@ -490,7 +493,7 @@ func TestForwardAsChatCompletions_OAuthEnforcesBufferedTokenLimitsLocally(t *tes
 				Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
 			}
 
-			result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "gpt-5.6-terra")
+			result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", tt.model)
 
 			require.NoError(t, err)
 			require.NotNil(t, result)
@@ -500,7 +503,7 @@ func TestForwardAsChatCompletions_OAuthEnforcesBufferedTokenLimitsLocally(t *tes
 			require.Equal(t, tt.limit, gjson.Get(rec.Body.String(), "usage.completion_tokens").Int())
 
 			content := gjson.Get(rec.Body.String(), "choices.0.message.content").String()
-			codec, codecErr := openAIInputTokensCodecForModel("gpt-5.6-terra")
+			codec, codecErr := openAIInputTokensCodecForModel(tt.model)
 			require.NoError(t, codecErr)
 			count, countErr := codec.Count(content)
 			require.NoError(t, countErr)

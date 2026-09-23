@@ -1014,6 +1014,276 @@ func TestOpenAIGatewayService_NativeOAuth_EnforcesStreamingResponsesTokenLimitLo
 	require.LessOrEqual(t, count, 5)
 }
 
+func TestOpenAIGatewayService_OAuthPassthrough_EnforcesStreamingResponsesTokenLimitLocally(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gpt-5.6-terra","stream":true,"max_output_tokens":5,"input":"What is the capital of France? Please answer in detail."}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamSSE := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_passthrough_stream_limit","object":"response","model":"gpt-5.6-terra","status":"in_progress","output":[]}}`,
+		"",
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","response_id":"resp_passthrough_stream_limit","output_index":0,"content_index":0,"delta":"Paris is the capital of France and a major center of government, culture, finance, education, transportation, art, history, and international diplomacy."}`,
+		"",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_passthrough_stream_limit","object":"response","model":"gpt-5.6-terra","status":"completed","output":[],"usage":{"input_tokens":28,"output_tokens":64,"total_tokens":92}}}`,
+		"",
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_passthrough_stream_limit"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamSSE)),
+	}}
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.Enabled = true
+	cfg.Gateway.OpenAIWS.OAuthEnabled = true
+	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	svc := &OpenAIGatewayService{
+		cfg:              cfg,
+		httpUpstream:     upstream,
+		openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
+	}
+	account := &Account{
+		ID: 128, Name: "passthrough", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
+		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
+		Extra: map[string]any{
+			"openai_passthrough":                           true,
+			"openai_oauth_responses_websockets_v2_enabled": true,
+		},
+		Status: StatusActive, Schedulable: true, RateMultiplier: f64p(1),
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, body)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, gjson.GetBytes(upstream.lastBody, "max_output_tokens").Exists())
+	require.Equal(t, 64, result.Usage.OutputTokens, "billing must retain real upstream usage")
+	_, usedPassthrough := c.Get("openai_passthrough")
+	require.False(t, usedPassthrough, "bounded OAuth requests must use the locally enforced pipeline")
+	decision, _ := c.Get("openai_ws_transport_decision")
+	reason, _ := c.Get("openai_ws_transport_reason")
+	require.Equal(t, string(OpenAIUpstreamTransportHTTPSSE), decision)
+	require.Equal(t, "local_output_token_limit", reason)
+	downstream := rec.Body.String()
+	require.NotContains(t, downstream, "response.output_text.delta")
+	require.Contains(t, downstream, `"type":"response.incomplete"`)
+	require.Contains(t, downstream, `"reason":"max_output_tokens"`)
+	terminalType, terminalPayload, ok := extractOpenAISSETerminalEvent(downstream)
+	require.True(t, ok)
+	require.Equal(t, "response.incomplete", terminalType)
+	require.Equal(t, int64(5), gjson.GetBytes(terminalPayload, "response.usage.output_tokens").Int())
+}
+
+func TestOpenAIGatewayService_OAuthPassthrough_BoundedRequestPreservesNamespaceHistory(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{
+		"model":"gpt-5.6-terra","stream":true,"max_tokens":20,"instructions":"test",
+		"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","parameters":{"type":"object"}}]}],
+		"input":[{"type":"function_call","call_id":"call_old","name":"spawn_agent","namespace":"collaboration","arguments":"{}"}]
+	}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamSSE := strings.Join([]string{
+		`data: {"type":"response.output_text.delta","response_id":"resp_namespace_limit","output_index":0,"content_index":0,"delta":"done"}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_namespace_limit","object":"response","model":"gpt-5.6-terra","status":"completed","output":[],"usage":{"input_tokens":12,"output_tokens":1,"total_tokens":13}}}`,
+		"",
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamSSE)),
+	}}
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.Enabled = true
+	cfg.Gateway.OpenAIWS.OAuthEnabled = true
+	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	svc := &OpenAIGatewayService{
+		cfg:              cfg,
+		httpUpstream:     upstream,
+		openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
+	}
+	account := &Account{
+		ID: 131, Name: "passthrough-namespace", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
+		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
+		Extra: map[string]any{
+			"openai_passthrough":                           true,
+			"openai_oauth_responses_websockets_v2_enabled": true,
+		},
+		Status: StatusActive, Schedulable: true, RateMultiplier: f64p(1),
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, body)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.OpenAIWSMode)
+	require.Equal(t, "namespace", gjson.GetBytes(upstream.lastBody, "tools.0.type").String())
+	require.Equal(t, "collaboration", gjson.GetBytes(upstream.lastBody, "tools.0.name").String())
+	require.Equal(t, "collaboration", gjson.GetBytes(upstream.lastBody, "input.0.namespace").String())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "max_tokens").Exists())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "max_output_tokens").Exists())
+	decision, _ := c.Get("openai_ws_transport_decision")
+	require.Equal(t, string(OpenAIUpstreamTransportHTTPSSE), decision)
+}
+
+func TestOpenAIGatewayService_OAuthPassthrough_BoundedRequestKeepsInstructionsValidation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gpt-5.1-codex","stream":true,"max_tokens":5,"instructions":"","input":"hello"}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	upstream := &httpUpstreamRecorder{}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	account := &Account{
+		ID: 132, Name: "passthrough-instructions", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
+		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
+		Extra:       map[string]any{"openai_passthrough": true},
+		Status:      StatusActive, Schedulable: true, RateMultiplier: f64p(1),
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, body)
+
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Nil(t, upstream.lastReq)
+	require.Contains(t, rec.Body.String(), "requires a non-empty instructions field")
+}
+
+func TestOpenAIGatewayService_OAuthPassthrough_OriginalTokenLimitCases(t *testing.T) {
+	tests := []struct {
+		name  string
+		model string
+		field string
+		limit int
+	}{
+		{name: "terra max_tokens", model: "gpt-5.6-terra", field: "max_tokens", limit: 20},
+		{name: "terra max_completion_tokens", model: "gpt-5.6-terra", field: "max_completion_tokens", limit: 5},
+		{name: "luna max_tokens", model: "gpt-5.6-luna", field: "max_tokens", limit: 20},
+		{name: "luna max_completion_tokens", model: "gpt-5.6-luna", field: "max_completion_tokens", limit: 5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			body := []byte(fmt.Sprintf(
+				`{"model":%q,"stream":true,%q:%d,"input":"What is the capital of France? Please answer in detail."}`,
+				tt.model, tt.field, tt.limit,
+			))
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			upstreamSSE := strings.Join([]string{
+				`event: response.output_text.delta`,
+				`data: {"type":"response.output_text.delta","response_id":"resp_original_case","output_index":0,"content_index":0,"delta":"Paris is the capital of France and a major center of government, culture, finance, education, transportation, art, history, and international diplomacy."}`,
+				"",
+				fmt.Sprintf(`data: {"type":"response.completed","response":{"id":"resp_original_case","object":"response","model":%q,"status":"completed","output":[],"usage":{"input_tokens":28,"output_tokens":64,"total_tokens":92}}}`, tt.model),
+				"",
+				`data: [DONE]`,
+				"",
+			}, "\n")
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(upstreamSSE)),
+			}}
+			svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+			account := &Account{
+				ID: 129, Name: "passthrough-original-cases", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
+				Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
+				Extra:       map[string]any{"openai_passthrough": true},
+				Status:      StatusActive, Schedulable: true, RateMultiplier: f64p(1),
+			}
+
+			result, err := svc.Forward(context.Background(), c, account, body)
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Equal(t, 64, result.Usage.OutputTokens, "billing must retain real upstream usage")
+			for _, field := range []string{"max_output_tokens", "max_completion_tokens", "max_tokens"} {
+				require.False(t, gjson.GetBytes(upstream.lastBody, field).Exists(), "upstream must not receive %s", field)
+			}
+			_, usedPassthrough := c.Get("openai_passthrough")
+			require.False(t, usedPassthrough)
+			terminalType, terminalPayload, ok := extractOpenAISSETerminalEvent(rec.Body.String())
+			require.True(t, ok)
+			require.Equal(t, "response.incomplete", terminalType)
+			require.Equal(t, "max_output_tokens", gjson.GetBytes(terminalPayload, "response.incomplete_details.reason").String())
+			require.Equal(t, int64(tt.limit), gjson.GetBytes(terminalPayload, "response.usage.output_tokens").Int())
+			visible := gjson.GetBytes(terminalPayload, "response.output.0.content.0.text").String()
+			codec, codecErr := openAIInputTokensCodecForModel(tt.model)
+			require.NoError(t, codecErr)
+			visibleTokens, countErr := codec.Count(visible)
+			require.NoError(t, countErr)
+			require.Positive(t, visibleTokens)
+			require.LessOrEqual(t, visibleTokens, tt.limit)
+		})
+	}
+}
+
+func TestOpenAIGatewayService_OAuthPassthrough_OriginalJSONSchemaCase(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{
+		"model":"gpt-5.6-terra","stream":true,"max_completion_tokens":3000,
+		"input":[{"role":"user","content":[{"type":"input_text","text":"Extract the required information from this sentence: John Doe is 42 years old."}]}],
+		"text":{"format":{"type":"json_schema","name":"simple_extraction","schema":{"type":"object","properties":{"age":{"type":"integer"},"full_name":{"type":"string"}},"required":["full_name","age"]}}}
+	}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamSSE := strings.Join([]string{
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","response_id":"resp_schema_case","output_index":0,"content_index":0,"delta":"{\"age\":42,\"full_name\":\"John Doe\"}"}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_schema_case","object":"response","model":"gpt-5.6-terra","status":"completed","output":[],"usage":{"input_tokens":32,"output_tokens":20,"total_tokens":52}}}`,
+		"",
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamSSE)),
+	}}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	account := &Account{
+		ID: 130, Name: "passthrough-schema-case", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
+		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
+		Extra:       map[string]any{"openai_passthrough": true},
+		Status:      StatusActive, Schedulable: true, RateMultiplier: f64p(1),
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, body)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, gjson.GetBytes(upstream.lastBody, "max_completion_tokens").Exists())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "max_output_tokens").Exists())
+	require.True(t, gjson.GetBytes(upstream.lastBody, "text.format.schema.additionalProperties").Exists())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "text.format.schema.additionalProperties").Bool())
+	terminalType, terminalPayload, ok := extractOpenAISSETerminalEvent(rec.Body.String())
+	require.True(t, ok)
+	require.Equal(t, "response.completed", terminalType)
+	require.JSONEq(t, `{"age":42,"full_name":"John Doe"}`, gjson.GetBytes(terminalPayload, "response.output.0.content.0.text").String())
+}
+
 func TestOpenAIResponsesLocalStreamAccumulator_IsTokenBounded(t *testing.T) {
 	acc := &openAIResponsesLocalStreamAccumulator{model: "gpt-5.6-terra", limit: 5}
 	first := []byte(`{"type":"response.reasoning_text.delta","delta":"consider several possible answers and compare them carefully"}`)

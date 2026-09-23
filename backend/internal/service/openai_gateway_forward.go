@@ -115,7 +115,31 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	wsDecision = resolveOpenAIWSDecisionByClientTransport(wsDecision, GetOpenAIClientTransport(c))
 	passthroughEnabled := account.IsOpenAIPassthroughEnabled()
 	compactPath := isOpenAIResponsesCompactPath(c)
-	if shouldFlattenOpenAIResponsesNamespaces(account, wsDecision.Transport, passthroughEnabled, compactPath) {
+	// The ChatGPT internal endpoint rejects output-limit fields. Bounded OAuth
+	// requests therefore need the normalized HTTP pipeline, which can strip the
+	// aliases and enforce the captured limit on the terminal response. Decide
+	// this before namespace and transport routing so a passthrough/WSv2 account
+	// cannot bypass local enforcement or receive passthrough-only rewrites.
+	localOutputTokenLimitRequested := account.UsesOpenAICodexProtocol() &&
+		requestedOutputTokenLimit != nil && !compactPath
+	effectivePassthroughEnabled := passthroughEnabled && !localOutputTokenLimitRequested
+	if localOutputTokenLimitRequested {
+		if passthroughEnabled {
+			if rejectReason := detectOpenAIPassthroughInstructionsRejectReason(
+				strings.TrimSpace(gjson.GetBytes(body, "model").String()), body,
+			); rejectReason != "" {
+				rejectMsg := "OpenAI codex passthrough requires a non-empty instructions field"
+				MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
+				logOpenAIPassthroughInstructionsRejected(ctx, c, account, strings.TrimSpace(gjson.GetBytes(body, "model").String()), rejectReason, body)
+				c.JSON(http.StatusForbidden, gin.H{
+					"error": gin.H{"type": "forbidden_error", "message": rejectMsg},
+				})
+				return nil, fmt.Errorf("openai passthrough rejected before upstream: %s", rejectReason)
+			}
+		}
+		wsDecision = openAIWSHTTPDecision("local_output_token_limit")
+	}
+	if shouldFlattenOpenAIResponsesNamespaces(account, wsDecision.Transport, effectivePassthroughEnabled, compactPath) {
 		body, err = flattenOpenAIResponsesNamespaces(c, body)
 		if err != nil {
 			setOpsUpstreamError(c, http.StatusBadRequest, err.Error(), "")
@@ -125,9 +149,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			return nil, err
 		}
 	}
-	if shouldStripOpenAIResponsesInputNamespaces(account, wsDecision.Transport, passthroughEnabled) {
+	if shouldStripOpenAIResponsesInputNamespaces(account, wsDecision.Transport, effectivePassthroughEnabled) {
 		keepToolCallNamespaces := shouldKeepOpenAIResponsesToolCallNamespaces(
-			account, wsDecision.Transport, passthroughEnabled, compactPath, body,
+			account, wsDecision.Transport, effectivePassthroughEnabled, compactPath, body,
 		)
 		body, err = stripOpenAIResponsesInputNamespaces(body, keepToolCallNamespaces)
 		if err != nil {
@@ -262,7 +286,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 		return nil, errors.New("openai ws v1 is temporarily unsupported; use ws v2")
 	}
-	if passthroughEnabled {
+	if effectivePassthroughEnabled {
 		attemptImageIntentInvalidated := false
 		if isCodexCLI && codexImageGenerationExplicitToolPolicy == codexImageGenerationExplicitToolPolicyStrip {
 			strippedBody, changed, stripErr := stripOpenAIImageGenerationToolsFromRawPayload(body)
@@ -294,7 +318,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			startTime,
 		)
 	}
-	if account.UsesOpenAICodexProtocol() && !compactPath {
+	if localOutputTokenLimitRequested {
 		setOpenAIResponsesLocalOutputTokenLimit(c, requestedOutputTokenLimit)
 	}
 
