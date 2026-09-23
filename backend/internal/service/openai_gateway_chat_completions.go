@@ -201,9 +201,10 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	}
 	originalModel := chatReq.Model
 	clientStream := chatReq.Stream
-	localOutputTokenLimit := openAIChatCompletionTokenLimit(&chatReq)
-	if !account.UsesOpenAICodexProtocol() || isResponsesShape || clientStream {
-		localOutputTokenLimit = nil
+	requestedOutputTokenLimit := openAIChatCompletionTokenLimit(&chatReq)
+	var localOutputTokenLimit *int
+	if account.UsesOpenAICodexProtocol() && !isResponsesShape && !clientStream {
+		localOutputTokenLimit = requestedOutputTokenLimit
 	}
 
 	// 2. Resolve model mapping early so compat prompt_cache_key injection can
@@ -421,6 +422,44 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	// 8. Handle error response with failover
 	if resp.StatusCode >= 400 {
 		respBody, upstreamMsg := s.readOpenAIUpstreamError(resp)
+		if !clientStream && !isResponsesShape && requestedOutputTokenLimit != nil &&
+			gjson.GetBytes(responsesBody, "max_output_tokens").Exists() &&
+			isOpenAICompatMaxOutputTokensRejection(resp.StatusCode, respBody) {
+			retryBody, deleteErr := sjson.DeleteBytes(responsesBody, "max_output_tokens")
+			if deleteErr != nil {
+				return nil, fmt.Errorf("delete rejected max_output_tokens for chat retry: %w", deleteErr)
+			}
+			_ = resp.Body.Close()
+			retryCtx, releaseRetryCtx := detachUpstreamContext(ctx)
+			retryReq, buildErr := s.buildUpstreamRequest(retryCtx, c, account, retryBody, token, true, promptCacheKey, false)
+			releaseRetryCtx()
+			if buildErr != nil {
+				return nil, fmt.Errorf("build max_output_tokens fallback request: %w", buildErr)
+			}
+			if promptCacheKey != "" {
+				apiKeyID := getAPIKeyIDFromContext(c)
+				sessionKey := promptCacheKey
+				if !compatPromptCacheTenantIsolated {
+					sessionKey = isolateOpenAIUpstreamSessionID(apiKeyID, codexAccountIdentitySource(c, account), promptCacheKey)
+				}
+				retryReq.Header.Set("session_id", generateSessionUUID(sessionKey))
+			}
+			logger.L().Info("openai chat_completions: retrying without rejected max_output_tokens",
+				zap.Int64("account_id", account.ID),
+				zap.String("upstream_model", upstreamModel),
+				zap.Int("local_output_token_limit", *requestedOutputTokenLimit),
+			)
+			resp, err = s.doOpenAIUpstream(retryReq, proxyURL, account)
+			if err != nil {
+				return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
+			}
+			responsesBody = retryBody
+			localOutputTokenLimit = requestedOutputTokenLimit
+			if resp.StatusCode < 400 {
+				goto handleSuccess
+			}
+			respBody, upstreamMsg = s.readOpenAIUpstreamError(resp)
+		}
 		if !agentIdentityTaskRecoveryWasTried(ctx) && s.isAgentIdentityAccount(ctx, account) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, respBody) {
 			expectedTaskID := account.GetCredential("task_id")
 			if err := s.recoverAgentIdentityTask(ctx, account, expectedTaskID); err != nil {
@@ -446,6 +485,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	}
 
 	// 9. Handle normal response
+handleSuccess:
 	var result *OpenAIForwardResult
 	var handleErr error
 	if clientStream {
@@ -489,6 +529,23 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	}
 
 	return result, handleErr
+}
+
+func isOpenAICompatMaxOutputTokensRejection(statusCode int, responseBody []byte) bool {
+	if statusCode != http.StatusBadRequest || len(responseBody) == 0 {
+		return false
+	}
+	code := strings.ToLower(strings.TrimSpace(extractUpstreamErrorCode(responseBody)))
+	message := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(responseBody)))
+	param := strings.ToLower(strings.TrimSpace(gjson.GetBytes(responseBody, "error.param").String()))
+	if param == "max_output_tokens" {
+		return isExplicitOpenAIResponsesFieldRejection(code, message) ||
+			message == "" || message == "upstream request failed"
+	}
+	if !isExplicitOpenAIResponsesFieldRejection(code, message) {
+		return false
+	}
+	return openAIResponsesRejectedParamFromMessage(message) == "max_output_tokens"
 }
 
 func normalizeResponsesRequestServiceTier(req *apicompat.ResponsesRequest) {
