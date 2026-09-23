@@ -217,6 +217,11 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 			return nil, fmt.Errorf("marshal responses request: %w", err)
 		}
 	}
+	if normalizedBody, schemaChanged, normalizeErr := normalizeOpenAIResponseFormatSchemasBody(responsesBody); normalizeErr != nil {
+		return nil, fmt.Errorf("normalize response format schemas: %w", normalizeErr)
+	} else if schemaChanged {
+		responsesBody = normalizedBody
+	}
 
 	logFields := []zap.Field{
 		zap.Int64("account_id", account.ID),

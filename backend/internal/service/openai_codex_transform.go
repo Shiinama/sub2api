@@ -152,7 +152,6 @@ var openAIChatGPTInternalUnsupportedFields = []string{
 }
 
 var openAICodexOAuthUnsupportedFields = append([]string{
-	"max_output_tokens",
 	"max_completion_tokens",
 	"temperature",
 	"top_p",
@@ -980,6 +979,12 @@ func normalizeOpenAIResponseJSONSchema(schema map[string]any) bool {
 			modified = true
 		}
 	}
+	if openAIResponseJSONSchemaIncludesType(schema["type"], "object") {
+		if _, exists := schema["additionalProperties"]; !exists {
+			schema["additionalProperties"] = false
+			modified = true
+		}
+	}
 	if properties, ok := schema["properties"].(map[string]any); ok {
 		for _, raw := range properties {
 			if child, ok := raw.(map[string]any); ok && normalizeOpenAIResponseJSONSchema(child) {
@@ -1039,6 +1044,26 @@ func normalizeOpenAIResponseJSONSchema(schema map[string]any) bool {
 		}
 	}
 	return modified
+}
+
+func openAIResponseJSONSchemaIncludesType(rawType any, expected string) bool {
+	switch value := rawType.(type) {
+	case string:
+		return value == expected
+	case []any:
+		for _, entry := range value {
+			if entryValue, ok := entry.(string); ok && entryValue == expected {
+				return true
+			}
+		}
+	case []string:
+		for _, entry := range value {
+			if entry == expected {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func ensureOpenAIResponsesImageGenerationTool(reqBody map[string]any) bool {
