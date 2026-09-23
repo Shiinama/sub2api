@@ -203,7 +203,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	clientStream := chatReq.Stream
 	requestedOutputTokenLimit := openAIChatCompletionTokenLimit(&chatReq)
 	var localOutputTokenLimit *int
-	if account.UsesOpenAICodexProtocol() && !isResponsesShape && !clientStream {
+	if !isResponsesShape && !clientStream {
 		localOutputTokenLimit = requestedOutputTokenLimit
 	}
 

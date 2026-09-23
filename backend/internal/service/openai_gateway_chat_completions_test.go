@@ -551,6 +551,38 @@ func TestForwardAsChatCompletions_APIKeyRetriesRejectedTokenLimitLocally(t *test
 	require.Equal(t, int64(20), gjson.Get(rec.Body.String(), "usage.completion_tokens").Int())
 }
 
+func TestForwardAsChatCompletions_APIKeyEnforcesIgnoredTokenLimitLocally(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gpt-5.6-sol","messages":[{"role":"user","content":"What is the capital of France? Please answer in detail."}],"stream":false,"max_tokens":20}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	const longAnswer = "Paris is the capital of France and a major center of government, culture, finance, education, transportation, art, history, and international diplomacy."
+	upstreamPayload := fmt.Sprintf(`data: {"type":"response.completed","response":{"id":"resp_ignored_limit","object":"response","model":"gpt-5.6-sol","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":%q}]}],"usage":{"input_tokens":28,"output_tokens":64,"total_tokens":92}}}`+"\n\n", longAnswer)
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_ignored_limit"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamPayload)),
+	}}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	account := &Account{
+		ID: 2, Name: "openai-compatible", Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1,
+		Credentials: map[string]any{"api_key": "sk-compatible"},
+		Extra:       map[string]any{"openai_responses_supported": true},
+	}
+
+	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "gpt-5.6-sol")
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, int64(20), gjson.GetBytes(upstream.lastBody, "max_output_tokens").Int())
+	require.Equal(t, 64, result.Usage.OutputTokens, "billing must retain real upstream usage")
+	require.Equal(t, "length", gjson.Get(rec.Body.String(), "choices.0.finish_reason").String())
+	require.Equal(t, int64(20), gjson.Get(rec.Body.String(), "usage.completion_tokens").Int())
+}
+
 func TestIsOpenAICompatMaxOutputTokensRejection(t *testing.T) {
 	require.True(t, isOpenAICompatMaxOutputTokensRejection(http.StatusBadRequest, []byte(`{"error":{"code":"unsupported_parameter","message":"Unsupported parameter: max_output_tokens"}}`)))
 	require.True(t, isOpenAICompatMaxOutputTokensRejection(http.StatusBadRequest, []byte(`{"error":{"code":"invalid_request_error","param":"max_output_tokens","message":"Upstream request failed"}}`)))
