@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
@@ -433,7 +435,7 @@ func TestForwardAsChatCompletions_OAuthJsonObjectKeepsSystemMessageInInput(t *te
 	require.Equal(t, 2, strings.Count(string(upstreamBody), systemPrompt))
 }
 
-func TestForwardAsChatCompletions_OAuthPreservesTokenLimits(t *testing.T) {
+func TestForwardAsChatCompletions_OAuthStripsUnsupportedUpstreamTokenLimits(t *testing.T) {
 	tests := []struct {
 		name  string
 		field string
@@ -449,15 +451,207 @@ func TestForwardAsChatCompletions_OAuthPreservesTokenLimits(t *testing.T) {
 
 			upstreamBody := forwardOAuthChatCompletionsForUpstreamBody(t, body)
 
-			require.Equal(t, tt.limit, gjson.GetBytes(upstreamBody, "max_output_tokens").Int())
+			require.False(t, gjson.GetBytes(upstreamBody, "max_output_tokens").Exists())
 			require.False(t, gjson.GetBytes(upstreamBody, "max_tokens").Exists())
 			require.False(t, gjson.GetBytes(upstreamBody, "max_completion_tokens").Exists())
 		})
 	}
 }
 
+func TestForwardAsChatCompletions_OAuthEnforcesBufferedTokenLimitsLocally(t *testing.T) {
+	const longAnswer = "Paris is the capital of France and a major center of government, culture, finance, education, transportation, art, history, and international diplomacy."
+	tests := []struct {
+		name  string
+		field string
+		limit int64
+	}{
+		{name: "max_tokens", field: "max_tokens", limit: 20},
+		{name: "max_completion_tokens", field: "max_completion_tokens", limit: 5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			body := []byte(fmt.Sprintf(`{"model":"gpt-5.6-terra","messages":[{"role":"user","content":"What is the capital of France? Please answer in detail."}],"stream":false,%q:%d}`, tt.field, tt.limit))
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			upstreamPayload := fmt.Sprintf(`data: {"type":"response.completed","response":{"id":"resp_limit","object":"response","model":"gpt-5.6-terra","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":%q}]}],"usage":{"input_tokens":28,"output_tokens":64,"total_tokens":92}}}`+"\n\n", longAnswer)
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_local_limit"}},
+				Body:       io.NopCloser(strings.NewReader(upstreamPayload)),
+			}}
+			svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+			account := &Account{
+				ID: 1, Name: "openai-oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
+				Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
+			}
+
+			result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "gpt-5.6-terra")
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Equal(t, 64, result.Usage.OutputTokens, "billing must retain real upstream usage")
+			require.False(t, gjson.GetBytes(upstream.lastBody, "max_output_tokens").Exists())
+			require.Equal(t, "length", gjson.Get(rec.Body.String(), "choices.0.finish_reason").String())
+			require.Equal(t, tt.limit, gjson.Get(rec.Body.String(), "usage.completion_tokens").Int())
+
+			content := gjson.Get(rec.Body.String(), "choices.0.message.content").String()
+			codec, codecErr := openAIInputTokensCodecForModel("gpt-5.6-terra")
+			require.NoError(t, codecErr)
+			count, countErr := codec.Count(content)
+			require.NoError(t, countErr)
+			require.Equal(t, int(tt.limit), count)
+			require.Less(t, len(content), len(longAnswer))
+		})
+	}
+}
+
+func TestTruncateOpenAIOutputTextToTokens_PreservesValidUTF8(t *testing.T) {
+	for _, text := range []string{
+		"The capital of France is Paris, with museums and monuments.",
+		"巴黎是法国的首都，也是重要的文化与艺术中心。",
+		"Paris 🗼 is beautiful in spring 🌸 and autumn 🍂.",
+	} {
+		truncated, kept, didTruncate, err := truncateOpenAIOutputTextToTokens(text, "gpt-5.6-terra", 3)
+		require.NoError(t, err)
+		require.True(t, didTruncate)
+		require.LessOrEqual(t, kept, 3)
+		require.True(t, utf8.ValidString(truncated))
+		codec, codecErr := openAIInputTokensCodecForModel("gpt-5.6-terra")
+		require.NoError(t, codecErr)
+		count, countErr := codec.Count(truncated)
+		require.NoError(t, countErr)
+		require.Equal(t, kept, count)
+	}
+}
+
+func TestApplyOpenAIChatLocalOutputTokenLimit_AccountsForReasoningAndToolCalls(t *testing.T) {
+	content, err := json.Marshal("short visible answer")
+	require.NoError(t, err)
+	resp := &apicompat.ChatCompletionsResponse{
+		Choices: []apicompat.ChatChoice{{
+			Message: apicompat.ChatMessage{
+				Role:             "assistant",
+				Content:          content,
+				ReasoningContent: "The model considered several possible answers before deciding that Paris is correct.",
+				ToolCalls: []apicompat.ChatToolCall{{
+					ID: "call_1", Type: "function",
+					Function: apicompat.ChatFunctionCall{Name: "lookup", Arguments: `{"q":"Paris"}`},
+				}},
+			},
+			FinishReason: "tool_calls",
+		}},
+		Usage: &apicompat.ChatUsage{
+			PromptTokens:     10,
+			CompletionTokens: 30,
+			TotalTokens:      40,
+			CompletionTokensDetails: &apicompat.ChatTokenDetails{
+				ReasoningTokens: 20,
+			},
+		},
+	}
+
+	applyOpenAIChatLocalOutputTokenLimit(resp, "gpt-5.6-terra", 10)
+
+	require.Equal(t, "length", resp.Choices[0].FinishReason)
+	require.Empty(t, resp.Choices[0].Message.ToolCalls)
+	var visibleContent string
+	require.NoError(t, json.Unmarshal(resp.Choices[0].Message.Content, &visibleContent))
+	require.Empty(t, visibleContent)
+	codec, codecErr := openAIInputTokensCodecForModel("gpt-5.6-terra")
+	require.NoError(t, codecErr)
+	reasoningCount, countErr := codec.Count(resp.Choices[0].Message.ReasoningContent)
+	require.NoError(t, countErr)
+	require.LessOrEqual(t, reasoningCount, 10)
+	require.Equal(t, 10, resp.Usage.CompletionTokens)
+	require.Equal(t, 20, resp.Usage.TotalTokens)
+	require.NotNil(t, resp.Usage.CompletionTokensDetails)
+	require.Equal(t, 10, resp.Usage.CompletionTokensDetails.ReasoningTokens)
+}
+
+func TestOpenAIChatCompletionTokenLimit_PrefersMaxCompletionTokens(t *testing.T) {
+	maxTokens, maxCompletionTokens := 20, 5
+	limit := openAIChatCompletionTokenLimit(&apicompat.ChatCompletionsRequest{
+		MaxTokens:           &maxTokens,
+		MaxCompletionTokens: &maxCompletionTokens,
+	})
+	require.NotNil(t, limit)
+	require.Equal(t, 5, *limit)
+}
+
+func TestApplyOpenAIChatLocalOutputTokenLimit_PreservesReasoningWithoutDetailsWhenWithinLimit(t *testing.T) {
+	content, err := json.Marshal("Paris")
+	require.NoError(t, err)
+	resp := &apicompat.ChatCompletionsResponse{
+		Choices: []apicompat.ChatChoice{{
+			Message: apicompat.ChatMessage{
+				Role:             "assistant",
+				Content:          content,
+				ReasoningContent: "brief thought",
+			},
+			FinishReason: "stop",
+		}},
+		Usage: &apicompat.ChatUsage{
+			PromptTokens:     10,
+			CompletionTokens: 5,
+			TotalTokens:      15,
+		},
+	}
+
+	applyOpenAIChatLocalOutputTokenLimit(resp, "gpt-5.6-terra", 10)
+
+	require.Equal(t, "stop", resp.Choices[0].FinishReason)
+	require.Equal(t, "brief thought", resp.Choices[0].Message.ReasoningContent)
+	var visibleContent string
+	require.NoError(t, json.Unmarshal(resp.Choices[0].Message.Content, &visibleContent))
+	require.Equal(t, "Paris", visibleContent)
+	require.Equal(t, 5, resp.Usage.CompletionTokens)
+	require.Nil(t, resp.Usage.CompletionTokensDetails)
+}
+
+func TestApplyOpenAIChatLocalOutputTokenLimit_PreservesKnownHiddenReasoningBudget(t *testing.T) {
+	content, err := json.Marshal("Paris is the capital of France and an important cultural center.")
+	require.NoError(t, err)
+	resp := &apicompat.ChatCompletionsResponse{
+		Choices: []apicompat.ChatChoice{{
+			Message: apicompat.ChatMessage{
+				Role:             "assistant",
+				Content:          content,
+				ReasoningContent: "brief",
+			},
+			FinishReason: "stop",
+		}},
+		Usage: &apicompat.ChatUsage{
+			PromptTokens:     10,
+			CompletionTokens: 20,
+			TotalTokens:      30,
+			CompletionTokensDetails: &apicompat.ChatTokenDetails{
+				ReasoningTokens: 8,
+			},
+		},
+	}
+
+	applyOpenAIChatLocalOutputTokenLimit(resp, "gpt-5.6-terra", 10)
+
+	require.Equal(t, "length", resp.Choices[0].FinishReason)
+	var visibleContent string
+	require.NoError(t, json.Unmarshal(resp.Choices[0].Message.Content, &visibleContent))
+	codec, codecErr := openAIInputTokensCodecForModel("gpt-5.6-terra")
+	require.NoError(t, codecErr)
+	visibleCount, countErr := codec.Count(visibleContent)
+	require.NoError(t, countErr)
+	require.LessOrEqual(t, visibleCount, 2)
+	require.Equal(t, 10, resp.Usage.CompletionTokens)
+	require.NotNil(t, resp.Usage.CompletionTokensDetails)
+	require.Equal(t, 8, resp.Usage.CompletionTokensDetails.ReasoningTokens)
+}
+
 func TestForwardAsChatCompletions_OAuthNormalizesJSONSchemaAdditionalProperties(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.6-terra","messages":[{"role":"user","content":"Extract John Doe's age."}],"stream":false,"response_format":{"type":"json_schema","json_schema":{"name":"simple_extraction","schema":{"type":"object","properties":{"age":{"type":"integer"},"person":{"type":"object","properties":{"full_name":{"type":"string"}}}},"required":["age","person"]}}}}`)
+	body := []byte(`{"model":"gpt-5.6-terra","messages":[{"role":"user","content":"Extract John Doe's age."}],"stream":false,"max_completion_tokens":3000,"response_format":{"type":"json_schema","json_schema":{"name":"simple_extraction","schema":{"type":"object","properties":{"age":{"type":"integer"},"person":{"type":"object","properties":{"full_name":{"type":"string"}}}},"required":["age","person"]}}}}`)
 
 	upstreamBody := forwardOAuthChatCompletionsForUpstreamBody(t, body)
 
@@ -468,6 +662,7 @@ func TestForwardAsChatCompletions_OAuthNormalizesJSONSchemaAdditionalProperties(
 	require.False(t, gjson.GetBytes(upstreamBody, "text.format.schema.properties.person.additionalProperties").Bool())
 	require.False(t, gjson.GetBytes(upstreamBody, "text.format.strict").Exists())
 	require.Equal(t, int64(2), gjson.GetBytes(upstreamBody, "text.format.schema.required.#").Int())
+	require.False(t, gjson.GetBytes(upstreamBody, "max_output_tokens").Exists())
 }
 
 func TestForwardAsChatCompletions_OAuthKeepsMixedSystemContentInInput(t *testing.T) {

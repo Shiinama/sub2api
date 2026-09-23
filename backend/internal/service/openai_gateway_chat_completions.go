@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -200,6 +201,10 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	}
 	originalModel := chatReq.Model
 	clientStream := chatReq.Stream
+	localOutputTokenLimit := openAIChatCompletionTokenLimit(&chatReq)
+	if !account.UsesOpenAICodexProtocol() || isResponsesShape || clientStream {
+		localOutputTokenLimit = nil
+	}
 
 	// 2. Resolve model mapping early so compat prompt_cache_key injection can
 	// derive a stable seed from the final upstream model family.
@@ -303,6 +308,13 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		var reqBody map[string]any
 		if err := json.Unmarshal(responsesBody, &reqBody); err != nil {
 			return nil, fmt.Errorf("unmarshal for codex transform: %w", err)
+		}
+		// Chat Completions requests are bridged to the ChatGPT internal Responses
+		// endpoint, which rejects max_output_tokens. Preserve the client limit in
+		// localOutputTokenLimit for buffered responses, but do not weaken native
+		// Responses passthrough semantics by stripping the field globally.
+		if !isResponsesShape && localOutputTokenLimit != nil {
+			delete(reqBody, "max_output_tokens")
 		}
 		isJSONObjectFormat := strings.EqualFold(strings.TrimSpace(gjson.GetBytes(responsesBody, "text.format.type").String()), "json_object")
 		codexResult := applyCodexOAuthTransformWithOptions(reqBody, codexOAuthTransformOptions{
@@ -439,7 +451,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	if clientStream {
 		result, handleErr = s.handleChatStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime, len(body))
 	} else {
-		result, handleErr = s.handleChatBufferedStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime)
+		result, handleErr = s.handleChatBufferedStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime, localOutputTokenLimit)
 	}
 	stampOpenAIResponsesUpstreamEndpoint(c, result)
 
@@ -543,6 +555,7 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 	billingModel string,
 	upstreamModel string,
 	startTime time.Time,
+	localOutputTokenLimit *int,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 
@@ -615,6 +628,9 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 	acc.SupplementResponseOutput(finalResponse)
 
 	chatResp := apicompat.ResponsesToChatCompletions(finalResponse, originalModel)
+	if localOutputTokenLimit != nil {
+		applyOpenAIChatLocalOutputTokenLimit(chatResp, originalModel, *localOutputTokenLimit)
+	}
 
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
@@ -648,6 +664,158 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 		}
 	}
 	return result, nil
+}
+
+func openAIChatCompletionTokenLimit(req *apicompat.ChatCompletionsRequest) *int {
+	if req == nil {
+		return nil
+	}
+	limit := req.MaxTokens
+	if req.MaxCompletionTokens != nil {
+		limit = req.MaxCompletionTokens
+	}
+	if limit == nil || *limit <= 0 {
+		return nil
+	}
+	value := *limit
+	return &value
+}
+
+func applyOpenAIChatLocalOutputTokenLimit(resp *apicompat.ChatCompletionsResponse, model string, limit int) {
+	if resp == nil || limit <= 0 || len(resp.Choices) == 0 {
+		return
+	}
+	choice := &resp.Choices[0]
+	upstreamCompletionTokens := 0
+	reasoningTokens := 0
+	if resp.Usage != nil {
+		upstreamCompletionTokens = resp.Usage.CompletionTokens
+		if resp.Usage.CompletionTokensDetails != nil {
+			reasoningTokens = resp.Usage.CompletionTokensDetails.ReasoningTokens
+		}
+	}
+	overLimit := upstreamCompletionTokens > limit
+	reasoningBudget := min(reasoningTokens, limit)
+	if reasoningTokens == 0 && choice.Message.ReasoningContent != "" {
+		codec, err := openAIInputTokensCodecForModel(model)
+		if err != nil {
+			logger.L().Warn("openai chat_completions: failed to count local reasoning tokens",
+				zap.Error(err),
+				zap.String("model", model),
+				zap.Int("limit", limit),
+			)
+			return
+		}
+		count, err := codec.Count(choice.Message.ReasoningContent)
+		if err != nil {
+			logger.L().Warn("openai chat_completions: failed to count local reasoning tokens",
+				zap.Error(err),
+				zap.String("model", model),
+				zap.Int("limit", limit),
+			)
+			return
+		}
+		reasoningBudget = min(count, limit)
+	}
+	if choice.Message.ReasoningContent != "" {
+		truncatedReasoning, keptReasoningTokens, didTruncate, err := truncateOpenAIOutputTextToTokens(
+			choice.Message.ReasoningContent,
+			model,
+			reasoningBudget,
+		)
+		if err != nil {
+			logger.L().Warn("openai chat_completions: failed to enforce local reasoning token limit",
+				zap.Error(err),
+				zap.String("model", model),
+				zap.Int("limit", limit),
+			)
+			return
+		}
+		if didTruncate {
+			choice.Message.ReasoningContent = truncatedReasoning
+			overLimit = true
+		}
+		if reasoningTokens == 0 {
+			reasoningBudget = keptReasoningTokens
+		}
+	}
+	visibleBudget := max(limit-reasoningBudget, 0)
+
+	var content string
+	if len(choice.Message.Content) > 0 && json.Unmarshal(choice.Message.Content, &content) == nil && content != "" {
+		truncated, _, didTruncate, err := truncateOpenAIOutputTextToTokens(content, model, visibleBudget)
+		if err != nil {
+			logger.L().Warn("openai chat_completions: failed to enforce local output token limit",
+				zap.Error(err),
+				zap.String("model", model),
+				zap.Int("limit", limit),
+			)
+			return
+		}
+		if didTruncate {
+			encoded, marshalErr := json.Marshal(truncated)
+			if marshalErr != nil {
+				return
+			}
+			choice.Message.Content = encoded
+			overLimit = true
+		}
+	}
+
+	// An incomplete tool call cannot be safely truncated while preserving valid
+	// JSON arguments. Drop it when upstream usage proves the completion exceeded
+	// the requested budget, and surface finish_reason=length instead.
+	if overLimit && len(choice.Message.ToolCalls) > 0 {
+		choice.Message.ToolCalls = nil
+	}
+	if !overLimit {
+		return
+	}
+	choice.FinishReason = "length"
+	if resp.Usage != nil {
+		resp.Usage.CompletionTokens = min(upstreamCompletionTokens, limit)
+		if upstreamCompletionTokens <= 0 {
+			resp.Usage.CompletionTokens = limit
+		}
+		resp.Usage.TotalTokens = resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+		if reasoningTokens > 0 {
+			resp.Usage.CompletionTokensDetails = &apicompat.ChatTokenDetails{
+				ReasoningTokens: min(reasoningTokens, resp.Usage.CompletionTokens),
+			}
+		} else {
+			resp.Usage.CompletionTokensDetails = nil
+		}
+	}
+}
+
+func truncateOpenAIOutputTextToTokens(text, model string, limit int) (string, int, bool, error) {
+	if text == "" {
+		return text, 0, false, nil
+	}
+	if limit <= 0 {
+		return "", 0, true, nil
+	}
+	codec, err := openAIInputTokensCodecForModel(model)
+	if err != nil {
+		return text, 0, false, err
+	}
+	ids, _, err := codec.Encode(text)
+	if err != nil {
+		return text, 0, false, err
+	}
+	if len(ids) <= limit {
+		return text, len(ids), false, nil
+	}
+	for kept := limit; kept > 0; kept-- {
+		prefix, decodeErr := codec.Decode(ids[:kept])
+		if decodeErr != nil {
+			continue
+		}
+		if utf8.ValidString(prefix) {
+			return prefix, kept, true, nil
+		}
+	}
+	return "", 0, true, nil
 }
 
 func (s *OpenAIGatewayService) newOpenAICompatBufferedReadFailoverError(
