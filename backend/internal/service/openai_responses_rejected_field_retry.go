@@ -163,13 +163,6 @@ func normalizeOpenAIResponsesRejectedFieldRetryBody(statusCode int, body, respon
 		if index, ok := openAIResponsesRejectedStatusIndex(param); ok {
 			return removeOpenAIResponsesRejectedStatusAtIndex(body, index)
 		}
-		if param == "max_output_tokens" && gjson.GetBytes(body, "max_output_tokens").Exists() {
-			retryBody, err := sjson.DeleteBytes(body, "max_output_tokens")
-			if err != nil {
-				return nil, "", false, fmt.Errorf("delete rejected max_output_tokens: %w", err)
-			}
-			return retryBody, "max_output_tokens parameter rejection", true, nil
-		}
 		if param == "truncation" && gjson.GetBytes(body, "truncation").Exists() {
 			retryBody, err := sjson.DeleteBytes(body, "truncation")
 			if err != nil {

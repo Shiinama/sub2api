@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -430,6 +431,43 @@ func TestForwardAsChatCompletions_OAuthJsonObjectKeepsSystemMessageInInput(t *te
 	require.Equal(t, "developer", gjson.GetBytes(upstreamBody, "input.0.role").String())
 	require.Equal(t, systemPrompt, gjson.GetBytes(upstreamBody, "input.0.content").String())
 	require.Equal(t, 2, strings.Count(string(upstreamBody), systemPrompt))
+}
+
+func TestForwardAsChatCompletions_OAuthPreservesTokenLimits(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		limit int64
+	}{
+		{name: "max_tokens", field: "max_tokens", limit: 20},
+		{name: "max_completion_tokens", field: "max_completion_tokens", limit: 5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(fmt.Sprintf(`{"model":"gpt-5.6-terra","messages":[{"role":"user","content":"What is the capital of France? Please answer in detail."}],"stream":false,%q:%d}`, tt.field, tt.limit))
+
+			upstreamBody := forwardOAuthChatCompletionsForUpstreamBody(t, body)
+
+			require.Equal(t, tt.limit, gjson.GetBytes(upstreamBody, "max_output_tokens").Int())
+			require.False(t, gjson.GetBytes(upstreamBody, "max_tokens").Exists())
+			require.False(t, gjson.GetBytes(upstreamBody, "max_completion_tokens").Exists())
+		})
+	}
+}
+
+func TestForwardAsChatCompletions_OAuthNormalizesJSONSchemaAdditionalProperties(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.6-terra","messages":[{"role":"user","content":"Extract John Doe's age."}],"stream":false,"response_format":{"type":"json_schema","json_schema":{"name":"simple_extraction","schema":{"type":"object","properties":{"age":{"type":"integer"},"person":{"type":"object","properties":{"full_name":{"type":"string"}}}},"required":["age","person"]}}}}`)
+
+	upstreamBody := forwardOAuthChatCompletionsForUpstreamBody(t, body)
+
+	require.Equal(t, "json_schema", gjson.GetBytes(upstreamBody, "text.format.type").String())
+	require.True(t, gjson.GetBytes(upstreamBody, "text.format.schema.additionalProperties").Exists())
+	require.False(t, gjson.GetBytes(upstreamBody, "text.format.schema.additionalProperties").Bool())
+	require.True(t, gjson.GetBytes(upstreamBody, "text.format.schema.properties.person.additionalProperties").Exists())
+	require.False(t, gjson.GetBytes(upstreamBody, "text.format.schema.properties.person.additionalProperties").Bool())
+	require.False(t, gjson.GetBytes(upstreamBody, "text.format.strict").Exists())
+	require.Equal(t, int64(2), gjson.GetBytes(upstreamBody, "text.format.schema.required.#").Int())
 }
 
 func TestForwardAsChatCompletions_OAuthKeepsMixedSystemContentInInput(t *testing.T) {

@@ -241,7 +241,7 @@ func mustMarshalJSON(t *testing.T, value any) []byte {
 
 func TestChatCompletionsToResponses_MaxTokens(t *testing.T) {
 	t.Run("max_tokens", func(t *testing.T) {
-		maxTokens := 100
+		maxTokens := 20
 		req := &ChatCompletionsRequest{
 			Model:     "gpt-4o",
 			MaxTokens: &maxTokens,
@@ -250,13 +250,12 @@ func TestChatCompletionsToResponses_MaxTokens(t *testing.T) {
 		resp, err := ChatCompletionsToResponses(req)
 		require.NoError(t, err)
 		require.NotNil(t, resp.MaxOutputTokens)
-		// Below minMaxOutputTokens (128), should be clamped
-		assert.Equal(t, minMaxOutputTokens, *resp.MaxOutputTokens)
+		assert.Equal(t, 20, *resp.MaxOutputTokens)
 	})
 
 	t.Run("max_completion_tokens_preferred", func(t *testing.T) {
-		maxTokens := 100
-		maxCompletion := 500
+		maxTokens := 20
+		maxCompletion := 5
 		req := &ChatCompletionsRequest{
 			Model:               "gpt-4o",
 			MaxTokens:           &maxTokens,
@@ -266,7 +265,7 @@ func TestChatCompletionsToResponses_MaxTokens(t *testing.T) {
 		resp, err := ChatCompletionsToResponses(req)
 		require.NoError(t, err)
 		require.NotNil(t, resp.MaxOutputTokens)
-		assert.Equal(t, 500, *resp.MaxOutputTokens)
+		assert.Equal(t, 5, *resp.MaxOutputTokens)
 	})
 }
 

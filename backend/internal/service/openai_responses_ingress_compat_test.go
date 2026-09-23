@@ -37,7 +37,7 @@ func TestNormalizeOpenAIResponsesLegacyIngressConvertsChatTopLevelFields(t *test
 	require.Equal(t, "function", gjson.GetBytes(normalized, "tool_choice.type").String())
 	require.Equal(t, "lookup", gjson.GetBytes(normalized, "tool_choice.name").String())
 	require.False(t, gjson.GetBytes(normalized, "tool_choice.function").Exists())
-	require.Equal(t, int64(128), gjson.GetBytes(normalized, "max_output_tokens").Int())
+	require.Equal(t, int64(64), gjson.GetBytes(normalized, "max_output_tokens").Int())
 	require.Equal(t, "high", gjson.GetBytes(normalized, "reasoning.effort").String())
 	require.Equal(t, "auto", gjson.GetBytes(normalized, "reasoning.summary").String())
 	require.Equal(t, "flex", gjson.GetBytes(normalized, "service_tier").String())
