@@ -2276,7 +2276,8 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
 	}
-	if bodyHasSSEFraming(body) {
+	bodyLooksLikeSSE := bodyHasSSEFraming(body)
+	if bodyLooksLikeSSE {
 		observeOpenAISSEBody(observer, string(body))
 	} else {
 		observer.ObserveOpenAI(body, strings.TrimSpace(gjson.GetBytes(body, "type").String()))
@@ -2284,9 +2285,10 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 
 	// Detect SSE responses from upstream and convert to JSON.
 	// Some upstreams (e.g. other sub2api instances) may return SSE even when
-	// stream=false was requested. Without this conversion the client would
-	// receive raw SSE text or a terminal event with empty output.
-	if isEventStreamResponse(resp.Header) {
+	// stream=false was requested, sometimes with a missing or incorrect
+	// Content-Type. Check physical SSE field lines as well as the header so
+	// these responses do not reach the client as raw event text.
+	if isEventStreamResponse(resp.Header) || bodyLooksLikeSSE {
 		return s.handlePassthroughSSEToJSON(resp, c, account, body, originalModel, mappedModel)
 	}
 
@@ -2401,6 +2403,8 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 		}
 	}
 	if !writeOpenAICompactSSEBridge(c, resp.StatusCode, body) {
+		// Gin's c.Data does not replace a Content-Type copied from upstream.
+		c.Header("Content-Type", contentType)
 		c.Data(resp.StatusCode, contentType, body)
 	}
 
