@@ -26,10 +26,10 @@ type FrameConn interface {
 
 type Usage struct {
 	InputTokens              int
+	ImageInputTokens         int
 	OutputTokens             int
 	CacheCreationInputTokens int
 	CacheReadInputTokens     int
-	ImageInputTokens         int
 	ImageOutputTokens        int
 }
 
@@ -1114,13 +1114,24 @@ func parseUsageAndAccumulate(
 	if !cachedResult.Exists() {
 		cachedResult = usageResult.Get("prompt_tokens_details.cached_tokens")
 	}
-	imageInputTokens := usageResult.Get("input_tokens_details.image_tokens").Int()
-	if imageInputTokens == 0 {
-		imageInputTokens = usageResult.Get("prompt_tokens_details.image_tokens").Int()
-	}
 	imageTokens := usageResult.Get("output_tokens_details.image_tokens").Int()
 	if imageTokens == 0 {
 		imageTokens = usageResult.Get("completion_tokens_details.image_tokens").Int()
+	}
+	imageInputTokens := usageResult.Get("input_tokens_details.image_tokens").Int()
+	if imageInputTokens <= 0 {
+		imageInputTokens = usageResult.Get("prompt_tokens_details.image_tokens").Int()
+	}
+	// 与 HTTP Responses 同口径：usage 缺图片计数时由托管工具 tool_usage.image_gen 回填。
+	imageGen := gjson.GetBytes(message, "response.tool_usage.image_gen")
+	if !imageGen.Exists() {
+		imageGen = gjson.GetBytes(message, "tool_usage.image_gen")
+	}
+	if imageTokens <= 0 {
+		imageTokens = max(imageGen.Get("output_tokens_details.image_tokens").Int(), 0)
+	}
+	if imageInputTokens <= 0 {
+		imageInputTokens = max(imageGen.Get("input_tokens_details.image_tokens").Int(), 0)
 	}
 
 	requireTotals := isTerminalEvent(strings.TrimSpace(eventType))
@@ -1146,12 +1157,13 @@ func parseUsageAndAccumulate(
 	}
 	parsedUsage := Usage{
 		InputTokens:              inputTokens,
+		ImageInputTokens:         int(imageInputTokens),
 		OutputTokens:             outputTokens,
 		CacheCreationInputTokens: openAICacheCreationTokensFromUsage(usageResult),
 		CacheReadInputTokens:     cachedTokens,
-		ImageInputTokens:         int(imageInputTokens),
 		ImageOutputTokens:        int(imageTokens),
 	}
+
 	if isTerminalEvent(strings.TrimSpace(eventType)) {
 		if relayUsageHasTokens(parsedUsage) || !relayUsageHasTokens(state.turnUsage) {
 			state.turnUsage = parsedUsage
@@ -1199,10 +1211,10 @@ func finalizeRelayTurnUsage(state *relayState) Usage {
 	}
 	turnUsage := state.turnUsage
 	state.usage.InputTokens += turnUsage.InputTokens
+	state.usage.ImageInputTokens += turnUsage.ImageInputTokens
 	state.usage.OutputTokens += turnUsage.OutputTokens
 	state.usage.CacheCreationInputTokens += turnUsage.CacheCreationInputTokens
 	state.usage.CacheReadInputTokens += turnUsage.CacheReadInputTokens
-	state.usage.ImageInputTokens += turnUsage.ImageInputTokens
 	state.usage.ImageOutputTokens += turnUsage.ImageOutputTokens
 	state.turnUsage = Usage{}
 	return turnUsage
