@@ -251,7 +251,54 @@ func TestNormalizeOpenAIResponseFormatSchemasBody_DoesNotExpandStrictSchema(t *t
 	require.True(t, changed) // Safe type inference still applies.
 	require.Equal(t, "object", gjson.GetBytes(normalized, "response_format.json_schema.schema.type").String())
 	require.False(t, gjson.GetBytes(normalized, "response_format.json_schema.schema.required").Exists())
-	require.False(t, gjson.GetBytes(normalized, "response_format.json_schema.schema.additionalProperties").Exists())
+	require.True(t, gjson.GetBytes(normalized, "response_format.json_schema.schema.additionalProperties").Exists())
+	require.False(t, gjson.GetBytes(normalized, "response_format.json_schema.schema.additionalProperties").Bool())
+}
+
+func TestNormalizeOpenAIResponseFormatSchemasBody_AddsAdditionalPropertiesFalseRecursively(t *testing.T) {
+	body := []byte(`{
+		"text":{"format":{"type":"json_schema","schema":{
+			"type":"object",
+			"properties":{
+				"profile":{"type":"object","properties":{"address":{"properties":{"city":{"type":"string"}}}}},
+				"entries":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"}}}},
+				"maybe":{"type":["object","null"],"properties":{"value":{"type":"string"}}}
+			},
+			"$defs":{"choice":{"anyOf":[{"type":"object","properties":{"code":{"type":"string"}}},{"type":"null"}]}}
+		}}}
+	}`)
+
+	normalized, changed, err := normalizeOpenAIResponseFormatSchemasBody(body)
+	require.NoError(t, err)
+	require.True(t, changed)
+	for _, path := range []string{
+		"text.format.schema.additionalProperties",
+		"text.format.schema.properties.profile.additionalProperties",
+		"text.format.schema.properties.profile.properties.address.additionalProperties",
+		"text.format.schema.properties.entries.items.additionalProperties",
+		"text.format.schema.properties.maybe.additionalProperties",
+		"text.format.schema.$defs.choice.anyOf.0.additionalProperties",
+	} {
+		value := gjson.GetBytes(normalized, path)
+		require.True(t, value.Exists(), path)
+		require.False(t, value.Bool(), path)
+	}
+	require.False(t, gjson.GetBytes(normalized, "text.format.strict").Exists())
+	require.False(t, gjson.GetBytes(normalized, "text.format.schema.required").Exists())
+	require.False(t, gjson.GetBytes(normalized, "text.format.schema.properties.profile.required").Exists())
+}
+
+func TestNormalizeOpenAIResponseFormatSchemasBody_PreservesExplicitAdditionalProperties(t *testing.T) {
+	body := []byte(`{"response_format":{"type":"json_schema","json_schema":{"schema":{"type":"object","additionalProperties":true,"properties":{"closed":{"type":"object","additionalProperties":false},"defaulted":{"type":"object"}}}}}}`)
+
+	normalized, changed, err := normalizeOpenAIResponseFormatSchemasBody(body)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.True(t, gjson.GetBytes(normalized, "response_format.json_schema.schema.additionalProperties").Bool())
+	require.True(t, gjson.GetBytes(normalized, "response_format.json_schema.schema.properties.closed.additionalProperties").Exists())
+	require.False(t, gjson.GetBytes(normalized, "response_format.json_schema.schema.properties.closed.additionalProperties").Bool())
+	require.True(t, gjson.GetBytes(normalized, "response_format.json_schema.schema.properties.defaulted.additionalProperties").Exists())
+	require.False(t, gjson.GetBytes(normalized, "response_format.json_schema.schema.properties.defaulted.additionalProperties").Bool())
 }
 
 func TestNormalizeOpenAIResponseFormatSchemasBody_TraversesNestedSchemaContainers(t *testing.T) {

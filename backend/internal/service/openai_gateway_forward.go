@@ -21,6 +21,8 @@ import (
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
+	setOpenAIResponsesLocalOutputTokenLimit(c, nil)
+	requestedOutputTokenLimit := openAIResponsesRequestedOutputTokenLimit(body)
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
 		SetActualOpenAIUpstreamEndpoint(c, "/v1/chat/completions")
 	}
@@ -113,7 +115,31 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	wsDecision = resolveOpenAIWSDecisionByClientTransport(wsDecision, GetOpenAIClientTransport(c))
 	passthroughEnabled := account.IsOpenAIPassthroughEnabled()
 	compactPath := isOpenAIResponsesCompactPath(c)
-	if shouldFlattenOpenAIResponsesNamespaces(account, wsDecision.Transport, passthroughEnabled, compactPath) {
+	// The ChatGPT internal endpoint rejects output-limit fields. Bounded OAuth
+	// requests therefore need the normalized HTTP pipeline, which can strip the
+	// aliases and enforce the captured limit on the terminal response. Decide
+	// this before namespace and transport routing so a passthrough/WSv2 account
+	// cannot bypass local enforcement or receive passthrough-only rewrites.
+	localOutputTokenLimitRequested := account.UsesOpenAICodexProtocol() &&
+		requestedOutputTokenLimit != nil && !compactPath
+	effectivePassthroughEnabled := passthroughEnabled && !localOutputTokenLimitRequested
+	if localOutputTokenLimitRequested {
+		if passthroughEnabled {
+			if rejectReason := detectOpenAIPassthroughInstructionsRejectReason(
+				strings.TrimSpace(gjson.GetBytes(body, "model").String()), body,
+			); rejectReason != "" {
+				rejectMsg := "OpenAI codex passthrough requires a non-empty instructions field"
+				MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
+				logOpenAIPassthroughInstructionsRejected(ctx, c, account, strings.TrimSpace(gjson.GetBytes(body, "model").String()), rejectReason, body)
+				c.JSON(http.StatusForbidden, gin.H{
+					"error": gin.H{"type": "forbidden_error", "message": rejectMsg},
+				})
+				return nil, fmt.Errorf("openai passthrough rejected before upstream: %s", rejectReason)
+			}
+		}
+		wsDecision = openAIWSHTTPDecision("local_output_token_limit")
+	}
+	if shouldFlattenOpenAIResponsesNamespaces(account, wsDecision.Transport, effectivePassthroughEnabled, compactPath) {
 		body, err = flattenOpenAIResponsesNamespaces(c, body)
 		if err != nil {
 			setOpsUpstreamError(c, http.StatusBadRequest, err.Error(), "")
@@ -123,9 +149,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			return nil, err
 		}
 	}
-	if shouldStripOpenAIResponsesInputNamespaces(account, wsDecision.Transport, passthroughEnabled) {
+	if shouldStripOpenAIResponsesInputNamespaces(account, wsDecision.Transport, effectivePassthroughEnabled) {
 		keepToolCallNamespaces := shouldKeepOpenAIResponsesToolCallNamespaces(
-			account, wsDecision.Transport, passthroughEnabled, compactPath, body,
+			account, wsDecision.Transport, effectivePassthroughEnabled, compactPath, body,
 		)
 		body, err = stripOpenAIResponsesInputNamespaces(body, keepToolCallNamespaces)
 		if err != nil {
@@ -254,7 +280,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 		return nil, errors.New("openai ws v1 is temporarily unsupported; use ws v2")
 	}
-	if passthroughEnabled {
+	if effectivePassthroughEnabled {
 		attemptImageIntentInvalidated := false
 		if isCodexCLI && codexImageGenerationExplicitToolPolicy == codexImageGenerationExplicitToolPolicyStrip {
 			strippedBody, changed, stripErr := stripOpenAIImageGenerationToolsFromRawPayload(body)
@@ -285,6 +311,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			reqStream,
 			startTime,
 		)
+	}
+	if localOutputTokenLimitRequested {
+		setOpenAIResponsesLocalOutputTokenLimit(c, requestedOutputTokenLimit)
 	}
 
 	bodyModified := false
@@ -581,42 +610,59 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 
 	if !isCodexCLI {
-		maxOutputTokens := gjson.GetBytes(body, "max_output_tokens")
-		if maxOutputTokens.Exists() {
-			switch account.Platform {
-			case PlatformOpenAI, PlatformDeepseek:
-				// Preserve Responses-native output limits unless the selected upstream
-				// explicitly rejects the field in the bounded HTTP retry loop below.
-			case PlatformAnthropic:
-				decoded, decodeErr := ensureReqBody()
-				if decodeErr != nil {
-					return nil, decodeErr
+		if account.UsesOpenAICodexProtocol() {
+			decoded, decodeErr := ensureReqBody()
+			if decodeErr != nil {
+				return nil, decodeErr
+			}
+			removed := false
+			for _, field := range []string{"max_output_tokens", "max_completion_tokens", "max_tokens"} {
+				if _, exists := decoded[field]; exists {
+					delete(decoded, field)
+					removed = true
 				}
-				delete(decoded, "max_output_tokens")
-				if _, hasMaxTokens := decoded["max_tokens"]; !hasMaxTokens {
-					decoded["max_tokens"] = maxOutputTokens.Value()
-				}
+			}
+			if removed {
 				markDecodedModified()
-			case PlatformGemini:
-				markPatchDelete("max_output_tokens")
-			default:
-				markPatchDelete("max_output_tokens")
 			}
-		}
-		// /v1/responses 的规范输出上限字段是 max_output_tokens；部分客户端仍按
-		// Chat Completions 习惯发送 max_tokens，兼容 Responses 上游会拒绝该字段（#4417）。
-		// 仅对 OpenAI 平台归一化：Anthropic 合法使用 max_tokens，其 max_output_tokens
-		// 反向转换已在上方 switch 中处理。
-		if account.Platform == PlatformOpenAI {
-			if maxTokens := gjson.GetBytes(body, "max_tokens"); maxTokens.Exists() {
-				if !gjson.GetBytes(body, "max_output_tokens").Exists() {
-					markPatchSet("max_output_tokens", maxTokens.Value())
+		} else {
+			maxOutputTokens := gjson.GetBytes(body, "max_output_tokens")
+			if maxOutputTokens.Exists() {
+				switch account.Platform {
+				case PlatformOpenAI, PlatformDeepseek:
+					// Preserve Responses-native output limits unless the selected upstream
+					// explicitly rejects the field in the bounded HTTP retry loop below.
+				case PlatformAnthropic:
+					decoded, decodeErr := ensureReqBody()
+					if decodeErr != nil {
+						return nil, decodeErr
+					}
+					delete(decoded, "max_output_tokens")
+					if _, hasMaxTokens := decoded["max_tokens"]; !hasMaxTokens {
+						decoded["max_tokens"] = maxOutputTokens.Value()
+					}
+					markDecodedModified()
+				case PlatformGemini:
+					markPatchDelete("max_output_tokens")
+				default:
+					markPatchDelete("max_output_tokens")
 				}
-				markPatchDelete("max_tokens")
 			}
-		}
-		if gjson.GetBytes(body, "max_completion_tokens").Exists() && (account.Type == AccountTypeAPIKey || account.Platform != PlatformOpenAI) {
-			markPatchDelete("max_completion_tokens")
+			// /v1/responses 的规范输出上限字段是 max_output_tokens；部分客户端仍按
+			// Chat Completions 习惯发送 max_tokens，兼容 Responses 上游会拒绝该字段（#4417）。
+			// 仅对 OpenAI 平台归一化：Anthropic 合法使用 max_tokens，其 max_output_tokens
+			// 反向转换已在上方 switch 中处理。
+			if account.Platform == PlatformOpenAI {
+				if maxTokens := gjson.GetBytes(body, "max_tokens"); maxTokens.Exists() {
+					if !gjson.GetBytes(body, "max_output_tokens").Exists() {
+						markPatchSet("max_output_tokens", maxTokens.Value())
+					}
+					markPatchDelete("max_tokens")
+				}
+			}
+			if gjson.GetBytes(body, "max_completion_tokens").Exists() && (account.Type == AccountTypeAPIKey || account.Platform != PlatformOpenAI) {
+				markPatchDelete("max_completion_tokens")
+			}
 		}
 		for _, unsupportedField := range []string{"prompt_cache_retention", "safety_identifier", "prompt_cache_options"} {
 			if gjson.GetBytes(body, unsupportedField).Exists() {
