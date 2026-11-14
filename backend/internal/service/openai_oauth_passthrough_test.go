@@ -1139,14 +1139,19 @@ func TestOpenAIGatewayService_OAuthPassthrough_BoundedRequestPreservesNamespaceH
 	require.Equal(t, string(OpenAIUpstreamTransportHTTPSSE), decision)
 }
 
-func TestOpenAIGatewayService_OAuthPassthrough_BoundedRequestKeepsInstructionsValidation(t *testing.T) {
+func TestOpenAIGatewayService_OAuthPassthrough_BoundedRequestAllowsEmptyInstructions(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	body := []byte(`{"model":"gpt-5.1-codex","stream":true,"max_tokens":5,"instructions":"","input":"hello"}`)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
-	upstream := &httpUpstreamRecorder{}
+	upstreamSSE := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_empty_instructions\",\"object\":\"response\",\"model\":\"gpt-5.1-codex\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":12,\"output_tokens\":1,\"total_tokens\":13}}}\n\ndata: [DONE]\n\n"
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamSSE)),
+	}}
 	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
 		ID: 132, Name: "passthrough-instructions", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
@@ -1157,11 +1162,13 @@ func TestOpenAIGatewayService_OAuthPassthrough_BoundedRequestKeepsInstructionsVa
 
 	result, err := svc.Forward(context.Background(), c, account, body)
 
-	require.Error(t, err)
-	require.Nil(t, result)
-	require.Equal(t, http.StatusForbidden, rec.Code)
-	require.Nil(t, upstream.lastReq)
-	require.Contains(t, rec.Body.String(), "requires a non-empty instructions field")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, upstream.lastReq)
+	require.NotEmpty(t, gjson.GetBytes(upstream.lastBody, "instructions").String())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "max_tokens").Exists())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "max_output_tokens").Exists())
 }
 
 func TestOpenAIGatewayService_OAuthPassthrough_OriginalTokenLimitCases(t *testing.T) {

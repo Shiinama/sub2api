@@ -126,19 +126,6 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		requestedOutputTokenLimit != nil && !compactPath
 	effectivePassthroughEnabled := passthroughEnabled && !localOutputTokenLimitRequested
 	if localOutputTokenLimitRequested {
-		if passthroughEnabled {
-			if rejectReason := detectOpenAIPassthroughInstructionsRejectReason(
-				strings.TrimSpace(gjson.GetBytes(body, "model").String()), body,
-			); rejectReason != "" {
-				rejectMsg := "OpenAI codex passthrough requires a non-empty instructions field"
-				MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
-				logOpenAIPassthroughInstructionsRejected(ctx, c, account, strings.TrimSpace(gjson.GetBytes(body, "model").String()), rejectReason, body)
-				c.JSON(http.StatusForbidden, gin.H{
-					"error": gin.H{"type": "forbidden_error", "message": rejectMsg},
-				})
-				return nil, fmt.Errorf("openai passthrough rejected before upstream: %s", rejectReason)
-			}
-		}
 		wsDecision = openAIWSHTTPDecision("local_output_token_limit")
 	}
 	if shouldFlattenOpenAIResponsesNamespaces(account, wsDecision.Transport, effectivePassthroughEnabled, compactPath) {
