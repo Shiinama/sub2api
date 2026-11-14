@@ -13,7 +13,9 @@ func configuredMinOutputTokens(cfg *config.Config) int {
 }
 
 func chatCompletionsToResponses(cfg *config.Config, req *apicompat.ChatCompletionsRequest) (*apicompat.ResponsesRequest, error) {
-	return apicompat.ChatCompletionsToResponsesWithMinOutputTokens(req, configuredMinOutputTokens(cfg))
+	// Explicit Chat Completions output limits must not be raised by an upstream
+	// compatibility floor, including on streaming requests.
+	return apicompat.ChatCompletionsToResponses(req)
 }
 
 func settingServiceConfig(settingService *SettingService) *config.Config {
