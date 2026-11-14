@@ -226,13 +226,14 @@ func calculateTokenStatsCost(pricing *ChannelModelPricing, tokens UsageTokens) *
 		totalTokens := tokens.InputTokens + tokens.OutputTokens + tokens.CacheCreationTokens + tokens.CacheReadTokens
 		if iv := FindMatchingInterval(pricing.Intervals, totalTokens); iv != nil {
 			p = &ChannelModelPricing{
-				InputPrice:        iv.InputPrice,
-				OutputPrice:       iv.OutputPrice,
-				CacheWritePrice:   iv.CacheWritePrice,
-				CacheWrite1hPrice: iv.CacheWrite1hPrice,
-				CacheReadPrice:    iv.CacheReadPrice,
-				PerRequestPrice:   iv.PerRequestPrice,
-				ImageInputPrice:   pricing.ImageInputPrice,
+				InputPrice:         iv.InputPrice,
+				OutputPrice:        iv.OutputPrice,
+				CacheWritePrice:    iv.CacheWritePrice,
+				CacheWrite1hPrice:  iv.CacheWrite1hPrice,
+				CacheWrite12hPrice: iv.CacheWrite12hPrice,
+				CacheReadPrice:     iv.CacheReadPrice,
+				PerRequestPrice:    iv.PerRequestPrice,
+				ImageInputPrice:    pricing.ImageInputPrice,
 			}
 		}
 	}
@@ -249,6 +250,9 @@ func calculateTokenStatsCost(pricing *ChannelModelPricing, tokens UsageTokens) *
 			cacheCreationCost = float64(cache5m)*deref(p.CacheWritePrice) +
 				float64(cache1h)*deref(p.CacheWrite1hPrice)
 		}
+	}
+	if cost, ok := openAICacheCreationTTLCost(tokens, deref(p.CacheWritePrice), p.CacheWrite12hPrice); ok {
+		cacheCreationCost = cost
 	}
 	textInputTokens := accountStatsTextInputTokens(tokens)
 	imageInputPrice := deref(p.ImageInputPrice)

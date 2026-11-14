@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -144,4 +147,40 @@ func TestDetachUpstreamContextSemantics(t *testing.T) {
 		defer release()
 		require.NoError(t, detached.Err())
 	})
+}
+
+func TestOpenAIImagesUpstreamContextPreservesBoundedDrain(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	detached, release, err := openAIImagesUpstreamContext(parent, 20*time.Millisecond)
+	require.NoError(t, err)
+	defer release()
+	attempt, closeAttempt := pkghttputil.NewUpstreamAttemptContext(detached, time.Hour)
+	defer closeAttempt()
+	cancel()
+	select {
+	case <-attempt.Done():
+	case <-time.After(time.Second):
+		t.Fatal("image upstream did not stop within the configured drain budget")
+	}
+	require.NoError(t, detached.Err())
+	_, releaseCanceled, err := openAIImagesUpstreamContext(parent, time.Second)
+	defer releaseCanceled()
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestDetachBoundedUpstreamContextPreservesDrainPolicy(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	detached, release := detachBoundedUpstreamContext(parent)
+	defer release()
+	_, hasDeadline := detached.Deadline()
+	require.True(t, hasDeadline)
+	attempt, closeAttempt := pkghttputil.NewUpstreamAttemptContext(detached, 20*time.Millisecond)
+	defer closeAttempt()
+	cancel()
+	select {
+	case <-attempt.Done():
+	case <-time.After(time.Second):
+		t.Fatal("bounded upstream lost the client cancellation drain policy")
+	}
+	require.NoError(t, detached.Err())
 }

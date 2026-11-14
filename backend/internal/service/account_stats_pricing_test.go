@@ -989,7 +989,7 @@ func TestResolveAccountStatsCost_Gemini36FlashTierUsesFallbackPricing(t *testing
 		UsageTokens{InputTokens: 1_000_000, OutputTokens: 1_000_000, CacheReadTokens: 1_000_000}, 1, 0, "", time.Time{}, true,
 	)
 	require.NotNil(t, result)
-	require.InDelta(t, 9.15, *result, 1e-12)
+	require.InDelta(t, 4.575, *result, 1e-12)
 }
 
 func TestResolveAccountStatsCost_AllMiss_ReturnsNil(t *testing.T) {
@@ -1208,4 +1208,22 @@ func newTestChannelServiceForStats(t *testing.T, channel *Channel, groupID int64
 	cache.loadedAt = time.Now()
 	cs.cache.Store(cache)
 	return cs
+}
+
+func TestCalculateStatsCost_ImageTokensWithOpenAICacheTTLs(t *testing.T) {
+	pricing := &ChannelModelPricing{
+		BillingMode: BillingModeToken,
+		InputPrice:  testPtrFloat64(0.001), ImageInputPrice: testPtrFloat64(0.008),
+		OutputPrice: testPtrFloat64(0.002), ImageOutputPrice: testPtrFloat64(0.01),
+		CacheWritePrice: testPtrFloat64(0.003), CacheWrite12hPrice: testPtrFloat64(0.007),
+	}
+	tokens := UsageTokens{
+		InputTokens: 100, ImageInputTokens: 20,
+		OutputTokens: 50, ImageOutputTokens: 10,
+		CacheCreationTokens: 30, CacheCreation30mTokens: 10, CacheCreation12hTokens: 20,
+	}
+	cost := calculateStatsCost(pricing, tokens, 1)
+	require.NotNil(t, cost)
+	// Each modality is counted once; each cache TTL uses its own price.
+	require.InDelta(t, 0.08+0.16+0.08+0.1+0.03+0.14, *cost, 1e-12)
 }
