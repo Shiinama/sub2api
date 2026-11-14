@@ -88,6 +88,7 @@ COPY --from=frontend-builder /app/backend/internal/web/dist ./internal/web/dist
 # Version precedence: build arg VERSION > exact git tag > cmd/server/VERSION
 RUN --mount=type=cache,id=s/d9401e48-1863-444c-a0bb-a5b7bb527100-sub2api-gomod,target=/go/pkg/mod \
     --mount=type=cache,id=s/d9401e48-1863-444c-a0bb-a5b7bb527100-sub2api-gobuild,target=/root/.cache/go-build \
+    set -ex && \
     VERSION_VALUE="${VERSION}" && \
     if [ -z "${VERSION_VALUE}" ]; then VERSION_VALUE="$(./scripts/resolve-version.sh)"; fi && \
     DATE_VALUE="${DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
@@ -96,7 +97,7 @@ RUN --mount=type=cache,id=s/d9401e48-1863-444c-a0bb-a5b7bb527100-sub2api-gomod,t
     -ldflags="-s -w -X main.Version=${VERSION_VALUE} -X main.Commit=${COMMIT} -X main.Date=${DATE_VALUE} -X main.BuildType=release" \
     -trimpath \
     -o /app/sub2api \
-    ./cmd/server
+    ./cmd/server 2>&1
 
 # -----------------------------------------------------------------------------
 # Stage 3: PostgreSQL Client (version-matched with docker-compose)
