@@ -47,11 +47,11 @@ func TestGatewayService_AdaptiveAnthropicBaseURLRouting(t *testing.T) {
 		})
 		c := gatewayAnthropicBaseURLContext(t)
 
-		req, _, err := svc.buildUpstreamRequest(context.Background(), c, account, body, "test-key", "apikey", "deepseek-chat", false, false)
+		req, _, err := svc.buildUpstreamRequest(context.Background(), c, account, body, "test-key", "apikey", "deepseek-chat", false, claudeUpstreamForwardingMode{})
 		require.NoError(t, err)
 		require.Equal(t, "https://anthropic.example.com/v1/messages?beta=true", req.URL.String())
 
-		countReq, _, err := svc.buildCountTokensRequest(context.Background(), c, account, body, "test-key", "apikey", "deepseek-chat", false)
+		countReq, _, err := svc.buildCountTokensRequest(context.Background(), c, account, body, "test-key", "apikey", "deepseek-chat", claudeUpstreamForwardingMode{})
 		require.NoError(t, err)
 		require.Equal(t, "https://anthropic.example.com/v1/messages/count_tokens?beta=true", countReq.URL.String())
 	})
@@ -60,7 +60,7 @@ func TestGatewayService_AdaptiveAnthropicBaseURLRouting(t *testing.T) {
 		account := gatewayAnthropicBaseURLAccount(map[string]any{
 			APIProtocolChatCompletions: "https://chat.example.com",
 		})
-		req, _, err := svc.buildUpstreamRequest(context.Background(), gatewayAnthropicBaseURLContext(t), account, body, "test-key", "apikey", "deepseek-chat", false, false)
+		req, _, err := svc.buildUpstreamRequest(context.Background(), gatewayAnthropicBaseURLContext(t), account, body, "test-key", "apikey", "deepseek-chat", false, claudeUpstreamForwardingMode{})
 		require.NoError(t, err)
 		require.Equal(t, "https://api.deepseek.com/anthropic/v1/messages?beta=true", req.URL.String())
 	})
@@ -74,7 +74,7 @@ func TestGatewayService_AdaptiveAnthropicBaseURLRouting(t *testing.T) {
 				"base_url": "https://custom-anthropic.example.com",
 			},
 		}
-		req, _, err := svc.buildUpstreamRequest(context.Background(), gatewayAnthropicBaseURLContext(t), account, body, "test-key", "apikey", "deepseek-chat", false, false)
+		req, _, err := svc.buildUpstreamRequest(context.Background(), gatewayAnthropicBaseURLContext(t), account, body, "test-key", "apikey", "deepseek-chat", false, claudeUpstreamForwardingMode{})
 		require.NoError(t, err)
 		require.Equal(t, "https://custom-anthropic.example.com/v1/messages?beta=true", req.URL.String())
 	})
@@ -99,7 +99,7 @@ func TestGatewayService_AnthropicPassthroughAndCountTokensUseSelectedBase(t *tes
 	require.Equal(t, "https://ollama.com/v1/messages/count_tokens?beta=true", countPassthroughReq.URL.String())
 	require.Equal(t, "Bearer test-key", countPassthroughReq.Header.Get("Authorization"))
 
-	countReq, _, err := svc.buildCountTokensRequest(context.Background(), c, account, body, "test-key", "apikey", "deepseek-v4-flash", false)
+	countReq, _, err := svc.buildCountTokensRequest(context.Background(), c, account, body, "test-key", "apikey", "deepseek-v4-flash", claudeUpstreamForwardingMode{})
 	require.NoError(t, err)
 	require.Equal(t, "https://ollama.com/v1/messages/count_tokens?beta=true", countReq.URL.String())
 	require.Equal(t, "Bearer test-key", countReq.Header.Get("Authorization"))

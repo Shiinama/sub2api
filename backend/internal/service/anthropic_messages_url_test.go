@@ -61,7 +61,7 @@ func TestAnthropicMessagesURL_EntryPoints(t *testing.T) {
 			}
 			svc := &GatewayService{cfg: &config.Config{}}
 			t.Run("forward", func(t *testing.T) {
-				req, wireBody, err := svc.buildUpstreamRequest(context.Background(), gatewayAnthropicBaseURLContext(t), account, body, "upstream-anthropic-key", "apikey", "claude-haiku-4-5", false, false)
+				req, wireBody, err := svc.buildUpstreamRequest(context.Background(), gatewayAnthropicBaseURLContext(t), account, body, "upstream-anthropic-key", "apikey", "claude-haiku-4-5", false, claudeUpstreamForwardingMode{})
 				require.NoError(t, err)
 				checkRequest(t, req)
 				require.JSONEq(t, string(body), string(wireBody))
@@ -120,7 +120,7 @@ func TestAnthropicMessagesURL_RespectsURLAllowlist(t *testing.T) {
 	svc := &GatewayService{cfg: cfg}
 	body := []byte(`{"model":"claude-haiku-4-5","messages":[]}`)
 	c := gatewayAnthropicBaseURLContext(t)
-	req, _, err := svc.buildUpstreamRequest(context.Background(), c, account, body, "test-key", "apikey", "claude-haiku-4-5", false, false)
+	req, _, err := svc.buildUpstreamRequest(context.Background(), c, account, body, "test-key", "apikey", "claude-haiku-4-5", false, claudeUpstreamForwardingMode{})
 	require.ErrorContains(t, err, "host is not allowed")
 	require.Nil(t, req)
 	req, _, err = svc.buildUpstreamRequestAnthropicAPIKeyPassthrough(context.Background(), c, account, body, "test-key")

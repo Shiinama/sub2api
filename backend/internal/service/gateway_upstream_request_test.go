@@ -45,7 +45,7 @@ func TestGatewayBuildUpstreamRequestRejectsForeignOAuthWithoutPenalty(t *testing
 	account := &Account{ID: 25, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	body := []byte(`{"model":"gpt-6-astra","messages":[]}`)
 
-	req, _, err := (&GatewayService{}).buildUpstreamRequest(context.Background(), nil, account, body, "chatgpt-token", "oauth", "gpt-6-astra", true, false)
+	req, _, err := (&GatewayService{}).buildUpstreamRequest(context.Background(), nil, account, body, "chatgpt-token", "oauth", "gpt-6-astra", true, claudeUpstreamForwardingMode{})
 	require.Nil(t, req)
 
 	var failoverErr *UpstreamFailoverError
