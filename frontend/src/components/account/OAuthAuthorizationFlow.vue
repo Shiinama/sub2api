@@ -1026,6 +1026,18 @@ const showHelpDialog = ref(false)
 const oauthState = ref('')
 const projectId = ref('')
 
+// A state parsed from a previously pasted callback URL belongs to the old
+// session; once a new auth URL/session is generated it must not be reused,
+// otherwise the exchange fails with "invalid state".
+watch(
+  () => [props.sessionId, props.authUrl] as const,
+  ([newSession, newUrl], [oldSession, oldUrl]) => {
+    if (newSession !== oldSession || newUrl !== oldUrl) {
+      oauthState.value = ''
+    }
+  }
+)
+
 watch(
   () => [props.platform, props.showEmailPasswordOption] as const,
   async ([platform, requested]) => {
