@@ -441,6 +441,10 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/exchange-setup-token-code", h.Admin.OAuth.ExchangeSetupTokenCode)
 		accounts.POST("/cookie-auth", h.Admin.OAuth.CookieAuth)
 		accounts.POST("/setup-token-cookie-auth", h.Admin.OAuth.SetupTokenCookieAuth)
+
+		// 邮箱（IMAP）接码：授权时临时拉取收件箱；已保存邮箱的账号可直接查看邮箱
+		accounts.POST("/imap/inbox", h.Admin.Account.ListIMAPInbox)
+		accounts.POST("/:id/mailbox", h.Admin.Account.ListAccountMailbox)
 	}
 }
 

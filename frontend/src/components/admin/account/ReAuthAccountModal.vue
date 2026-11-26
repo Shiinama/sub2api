@@ -120,6 +120,16 @@
         </div>
       </div>
 
+      <AccountMailboxPanel
+        v-if="account"
+        :key="account.id"
+        v-model="mailboxConfig"
+        :platform-label="mailboxPlatformLabel"
+        :account-id="account.id"
+        :has-saved-password="accountHasSavedMailboxPassword(account)"
+        class="mb-4"
+      />
+
       <OAuthAuthorizationFlow
         ref="oauthFlowRef"
         :add-method="addMethod"
@@ -207,6 +217,13 @@ import type { Account } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import OAuthAuthorizationFlow from '@/components/account/OAuthAuthorizationFlow.vue'
+import AccountMailboxPanel from '@/components/account/AccountMailboxPanel.vue'
+import {
+  accountHasSavedMailboxPassword,
+  defaultMailboxConfig,
+  loadRememberedMailbox,
+  mailboxFromAccount
+} from '@/components/account/mailbox'
 
 // Type for exposed OAuthAuthorizationFlow component
 // Note: defineExpose automatically unwraps refs, so we use the unwrapped types
@@ -323,11 +340,24 @@ const canExchangeCode = computed(() => {
   return authCode.trim() && sessionId && !loading
 })
 
+// Mailbox (IMAP) for login verification codes: prefer the one saved on the account.
+const mailboxConfig = ref(defaultMailboxConfig())
+const MAILBOX_PLATFORM_LABELS: Record<string, string> = {
+  anthropic: 'Claude',
+  openai: 'OpenAI',
+  gemini: 'Gemini',
+  antigravity: 'Antigravity',
+  grok: 'Grok'
+}
+const mailboxPlatformLabel = computed(() => MAILBOX_PLATFORM_LABELS[props.account?.platform ?? ''] ?? '')
+
 // Watchers
 watch(
   () => props.show,
   (newVal) => {
     if (newVal && props.account) {
+      mailboxConfig.value =
+        mailboxFromAccount(props.account) ?? loadRememberedMailbox() ?? defaultMailboxConfig()
       // Initialize addMethod based on current account type (Claude only)
       if (
         isAnthropic.value &&

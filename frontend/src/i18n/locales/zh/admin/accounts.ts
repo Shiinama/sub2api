@@ -1361,6 +1361,30 @@ export default {
         pleaseEnterApiKey: '请输入上游 API Key'
       },
       // OAuth flow
+      mailbox: {
+        title: '邮箱登录',
+        titleWithPlatform: '{platform} 邮箱登录',
+        host: 'IMAP 主机',
+        port: 'IMAP 端口',
+        username: '邮箱账号',
+        password: 'App Password',
+        passwordSavedPlaceholder: '已保存，留空则使用已保存的密码',
+        folder: '邮箱文件夹',
+        pull: '拉取收件箱',
+        pulling: '拉取中...',
+        saveHint: '邮箱配置会随账号保存，之后可在「查看邮箱」中直接拉取。',
+        existingHint: '修改后点「保存到账号」，之后重新验证时可直接拉取。',
+        saveToAccount: '保存到账号',
+        saved: '邮箱配置已保存到账号',
+        latestCode: '最新验证码',
+        copy: '复制',
+        copied: '验证码已复制',
+        empty: '最近 {minutes} 分钟内没有邮件',
+        missingFields: '请填写 IMAP 主机、邮箱账号和 App Password',
+        viewMailbox: '查看邮箱',
+        modalTitle: '查看邮箱',
+        refresh: '刷新'
+      },
       oauth: {
         title: 'Claude 账号授权',
         authMethod: '授权方式',

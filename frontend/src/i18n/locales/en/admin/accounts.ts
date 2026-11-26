@@ -1249,6 +1249,30 @@ export default {
         pleaseEnterApiKey: 'Please enter upstream API Key'
       },
       // OAuth flow
+      mailbox: {
+        title: 'Email Login',
+        titleWithPlatform: '{platform} Email Login',
+        host: 'IMAP Host',
+        port: 'IMAP Port',
+        username: 'Email Account',
+        password: 'App Password',
+        passwordSavedPlaceholder: 'Saved — leave blank to use the saved password',
+        folder: 'Mail Folder',
+        pull: 'Pull Inbox',
+        pulling: 'Pulling...',
+        saveHint: 'The mailbox is saved with the account; later you can pull it from "View Mailbox".',
+        existingHint: 'Click "Save to Account" after changes so re-verification can pull directly.',
+        saveToAccount: 'Save to Account',
+        saved: 'Mailbox saved to account',
+        latestCode: 'Latest Code',
+        copy: 'Copy',
+        copied: 'Code copied',
+        empty: 'No mail in the last {minutes} minutes',
+        missingFields: 'Please fill in IMAP host, email account and App Password',
+        viewMailbox: 'View Mailbox',
+        modalTitle: 'View Mailbox',
+        refresh: 'Refresh'
+      },
       oauth: {
         title: 'Claude Account Authorization',
         authMethod: 'Authorization Method',

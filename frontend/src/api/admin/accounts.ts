@@ -485,6 +485,68 @@ export async function exchangeCode(
   return data
 }
 
+export interface MailboxConfig {
+  host: string
+  port: number
+  username: string
+  password: string
+  folder: string
+}
+
+export interface MailboxMessage {
+  uid: number
+  subject: string
+  from: string
+  to: string
+  received_at: string
+  code?: string
+  preview: string
+}
+
+export interface MailboxInboxResult {
+  messages: MailboxMessage[]
+  latest_code: string
+}
+
+// IMAP handshakes can be slow behind proxies; the backend allows up to ~55s.
+const MAILBOX_TIMEOUT_MS = 60000
+
+export interface IMAPInboxRequest {
+  /** When password is empty, use the password saved on this account. */
+  account_id?: number
+  host: string
+  port?: number
+  username: string
+  password?: string
+  folder?: string
+  sender_filter?: string
+  since_minutes?: number
+  limit?: number
+}
+
+/**
+ * Read recent mail with ad-hoc IMAP settings (credentials are not stored by this call).
+ */
+export async function listIMAPInbox(payload: IMAPInboxRequest): Promise<MailboxInboxResult> {
+  const { data } = await apiClient.post<MailboxInboxResult>('/admin/accounts/imap/inbox', payload, {
+    timeout: MAILBOX_TIMEOUT_MS
+  })
+  return data
+}
+
+/**
+ * Read recent mail using the mailbox saved on an account.
+ */
+export async function getAccountMailbox(
+  id: number,
+  options: { since_minutes?: number; limit?: number; sender_filter?: string } = {}
+): Promise<MailboxInboxResult> {
+  const { data } = await apiClient.post<MailboxInboxResult>(`/admin/accounts/${id}/mailbox`, options, {
+    timeout: MAILBOX_TIMEOUT_MS
+  })
+  return data
+}
+
 /**
  * Batch create accounts
  * @param accounts - Array of account data
@@ -1184,6 +1246,8 @@ export const accountsAPI = {
   syncUpstreamModelsPreview,
   generateAuthUrl,
   exchangeCode,
+  listIMAPInbox,
+  getAccountMailbox,
   refreshOpenAIToken,
   batchCreate,
   batchUpdateCredentials,

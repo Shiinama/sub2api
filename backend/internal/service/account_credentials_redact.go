@@ -12,6 +12,8 @@ var SensitiveCredentialKeys = []string{
 	// 云服务凭据
 	"aws_secret_access_key", "aws_session_token",
 	"service_account_json", "service_account", "private_key",
+	// 账号绑定的接码邮箱（IMAP）密码
+	"imap_password",
 }
 
 var sensitiveCredentialKeySet = func() map[string]struct{} {

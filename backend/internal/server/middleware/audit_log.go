@@ -153,6 +153,7 @@ var auditBodyOmittedRoutes = map[string]struct{}{
 	"POST /api/v1/user/passkeys/register/finish":                {},
 	"POST /api/v1/admin/accounts/import/codex-session":          {},
 	"PUT /api/v1/admin/accounts/:id/ollama-cloud-usage/session": {},
+	"POST /api/v1/admin/accounts/imap/inbox":                    {},
 	"PUT /api/v1/admin/prompt-audit/config":                     {},
 	"POST /api/v1/admin/prompt-audit/endpoints/probe":           {},
 	"DELETE /api/v1/admin/prompt-audit/events/:id":              {},

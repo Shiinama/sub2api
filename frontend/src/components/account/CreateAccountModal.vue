@@ -3800,6 +3800,7 @@
 
     <!-- Step 2: OAuth Authorization -->
     <div v-else class="space-y-5">
+      <AccountMailboxPanel v-model="mailboxConfig" :platform-label="mailboxPlatformLabel" />
       <OAuthAuthorizationFlow
         ref="oauthFlowRef"
         :add-method="form.platform === 'anthropic' ? addMethod : 'oauth'"
@@ -4261,6 +4262,8 @@ import {
   type OpenAIWSMode
 } from '@/utils/openaiWsMode'
 import OAuthAuthorizationFlow from './OAuthAuthorizationFlow.vue'
+import AccountMailboxPanel from './AccountMailboxPanel.vue'
+import { defaultMailboxConfig, loadRememberedMailbox, withMailboxCredentials } from './mailbox'
 
 // Type for exposed OAuthAuthorizationFlow component
 // Note: defineExpose automatically unwraps refs, so we use the unwrapped types
@@ -5624,10 +5627,23 @@ const ensureAntigravityMixedChannelConfirmed = async (onConfirm: () => Promise<v
   }
 }
 
+// Mailbox (IMAP) used to receive login verification codes; saved onto the created account.
+const mailboxConfig = ref(loadRememberedMailbox() ?? defaultMailboxConfig())
+const MAILBOX_PLATFORM_LABELS: Record<string, string> = {
+  anthropic: 'Claude',
+  openai: 'OpenAI',
+  gemini: 'Gemini',
+  antigravity: 'Antigravity',
+  grok: 'Grok'
+}
+const mailboxPlatformLabel = computed(() => MAILBOX_PLATFORM_LABELS[form.platform] ?? '')
+const createAccountWithMailbox = (payload: CreateAccountRequest) =>
+  adminAPI.accounts.create(withMailboxCredentials(payload, mailboxConfig.value))
+
 const submitCreateAccount = async (payload: CreateAccountRequest) => {
   submitting.value = true
   try {
-    const account = await adminAPI.accounts.create(withAntigravityConfirmFlag(payload))
+    const account = await createAccountWithMailbox(withAntigravityConfirmFlag(payload))
     const modelMapping = payload.credentials.model_mapping
     const hasConcreteMappedTarget = payload.type === 'apikey' &&
       typeof modelMapping === 'object' &&
@@ -6486,7 +6502,7 @@ const handleGrokValidateRT = async (refreshTokenInput: string) => {
           return
         }
 
-        await adminAPI.accounts.create({
+        await createAccountWithMailbox({
           name: accountName,
           notes: form.notes,
           platform: 'grok',
@@ -6663,7 +6679,7 @@ const handleGrokAuthorizePassword = async (emailPasswordInput: string) => {
           return
         }
 
-        await adminAPI.accounts.create({
+        await createAccountWithMailbox({
           name: accountName,
           notes: form.notes,
           platform: 'grok',
@@ -6762,7 +6778,7 @@ const handleOpenAIExchange = async (authCode: string) => {
     }
 
     if (shouldCreateOpenAI) {
-      await adminAPI.accounts.create({
+      await createAccountWithMailbox({
         name: form.name,
         notes: form.notes,
         platform: 'openai',
@@ -7043,7 +7059,7 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
         const accountName = refreshTokens.length > 1 ? `${baseName} #${i + 1}` : baseName
 
         if (shouldCreateOpenAI) {
-          await adminAPI.accounts.create({
+          await createAccountWithMailbox({
             name: accountName,
             notes: form.notes,
             platform: 'openai',
@@ -7158,7 +7174,7 @@ const handleAntigravityValidateRT = async (refreshTokenInput: string) => {
           expires_at: form.expires_at,
           auto_pause_on_expired: autoPauseOnExpired.value
         })
-        await adminAPI.accounts.create(createPayload)
+        await createAccountWithMailbox(createPayload)
         successCount++
       } catch (error: any) {
         failedCount++
@@ -7523,7 +7539,7 @@ const handleCookieAuth = async (sessionKey: string) => {
           credentials.temp_unschedulable_rules = tempUnschedPayload
         }
 
-        await adminAPI.accounts.create({
+        await createAccountWithMailbox({
           name: accountName,
           notes: form.notes,
           platform: form.platform,
