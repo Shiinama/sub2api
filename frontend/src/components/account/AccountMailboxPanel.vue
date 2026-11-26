@@ -75,7 +75,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import { adminAPI } from '@/api/admin'
@@ -83,7 +83,7 @@ import { useAppStore } from '@/stores/app'
 import type { MailboxConfig, MailboxInboxResult } from '@/api/admin/accounts'
 import type { Account } from '@/types'
 import MailboxMessageList from './MailboxMessageList.vue'
-import { rememberMailbox, saveAccountMailbox } from './mailbox'
+import { saveAccountMailbox } from './mailbox'
 
 const props = withDefaults(
   defineProps<{
@@ -115,15 +115,6 @@ const title = computed(() =>
 )
 const hint = computed(() =>
   props.accountId ? t('admin.accounts.mailbox.existingHint') : t('admin.accounts.mailbox.saveHint')
-)
-
-// Remember the last mailbox (including password) in this browser by default.
-watch(
-  config,
-  (value) => {
-    if (value.username && value.password) rememberMailbox(value)
-  },
-  { deep: true }
 )
 
 const canUseSavedPassword = computed(

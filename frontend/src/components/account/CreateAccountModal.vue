@@ -4263,7 +4263,7 @@ import {
 } from '@/utils/openaiWsMode'
 import OAuthAuthorizationFlow from './OAuthAuthorizationFlow.vue'
 import AccountMailboxPanel from './AccountMailboxPanel.vue'
-import { defaultMailboxConfig, loadRememberedMailbox, withMailboxCredentials } from './mailbox'
+import { defaultMailboxConfig, withMailboxCredentials } from './mailbox'
 
 // Type for exposed OAuthAuthorizationFlow component
 // Note: defineExpose automatically unwraps refs, so we use the unwrapped types
@@ -5628,7 +5628,7 @@ const ensureAntigravityMixedChannelConfirmed = async (onConfirm: () => Promise<v
 }
 
 // Mailbox (IMAP) used to receive login verification codes; saved onto the created account.
-const mailboxConfig = ref(loadRememberedMailbox() ?? defaultMailboxConfig())
+const mailboxConfig = ref(defaultMailboxConfig())
 const MAILBOX_PLATFORM_LABELS: Record<string, string> = {
   anthropic: 'Claude',
   openai: 'OpenAI',
@@ -5697,6 +5697,7 @@ const submitCreateAccount = async (payload: CreateAccountRequest) => {
 // Methods
 const resetForm = () => {
   step.value = 1
+  mailboxConfig.value = defaultMailboxConfig()
   form.name = ''
   form.notes = ''
   form.platform = 'anthropic'

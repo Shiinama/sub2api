@@ -11,28 +11,18 @@ export const MAILBOX_CREDENTIAL_KEYS = {
   folder: 'imap_folder'
 } as const
 
-const STORAGE_KEY = 'sub2api.mailbox.v1'
+// Earlier builds remembered the last mailbox (including its password) in
+// localStorage and pre-filled it for every new account. That is no longer done;
+// remove any copy left behind in this browser.
+const LEGACY_STORAGE_KEY = 'sub2api.mailbox.v1'
+try {
+  localStorage.removeItem(LEGACY_STORAGE_KEY)
+} catch {
+  // storage unavailable — ignore
+}
 
 export function defaultMailboxConfig(): MailboxConfig {
   return { host: 'imap.gmail.com', port: 993, username: '', password: '', folder: 'INBOX' }
-}
-
-export function loadRememberedMailbox(): MailboxConfig | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    return raw ? { ...defaultMailboxConfig(), ...(JSON.parse(raw) as Partial<MailboxConfig>) } : null
-  } catch {
-    return null
-  }
-}
-
-export function rememberMailbox(config: MailboxConfig | null) {
-  try {
-    if (config) localStorage.setItem(STORAGE_KEY, JSON.stringify(config))
-    else localStorage.removeItem(STORAGE_KEY)
-  } catch {
-    // storage unavailable — ignore
-  }
 }
 
 /** Mailbox config saved on an account (password is never returned; see hasSavedPassword). */

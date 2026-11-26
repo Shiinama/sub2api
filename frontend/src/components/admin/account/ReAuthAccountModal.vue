@@ -221,7 +221,6 @@ import AccountMailboxPanel from '@/components/account/AccountMailboxPanel.vue'
 import {
   accountHasSavedMailboxPassword,
   defaultMailboxConfig,
-  loadRememberedMailbox,
   mailboxFromAccount
 } from '@/components/account/mailbox'
 
@@ -357,7 +356,7 @@ watch(
   (newVal) => {
     if (newVal && props.account) {
       mailboxConfig.value =
-        mailboxFromAccount(props.account) ?? loadRememberedMailbox() ?? defaultMailboxConfig()
+        mailboxFromAccount(props.account) ?? defaultMailboxConfig()
       // Initialize addMethod based on current account type (Claude only)
       if (
         isAnthropic.value &&
